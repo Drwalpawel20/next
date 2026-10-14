@@ -13,13 +13,56 @@ const title = "O mnie – Paweł Drwal | Student informatyki, ML i dane";
 const description = "Paweł Drwal – student informatyki. Interesuję się uczeniem maszynowym, analizą danych, aplikacjami mobilnymi i automatyzacją procesów. Szukam stażu lub pierwszej pracy.";
 
 export const metadata: Metadata = {
-  title,
-  description,
-  keywords: ["Paweł Drwal", "o mnie", "student informatyki", "machine learning", "Python", "staż IT", "junior developer"],
-  alternates: { canonical: SITE.aboutUrl },
-  openGraph: { type: "profile", url: SITE.aboutUrl, title: "O mnie – Paweł Drwal", description: "Student informatyki. ML, dane, Android, automatyzacja. Open to work." },
-  twitter: { card: "summary", title: "O mnie – Paweł Drwal", description: "Student informatyki, ML, dane, open to work" },
+title: "O mnie | Paweł Drwal – Student Inżynierii Danych",
+description:
+"Poznaj Pawła Drwala — studenta Inżynierii Danych na Akademii Tarnowskiej. Interesuję się Data Engineering, Pythonem, SQL, Machine Learning, analizą danych, Power BI i automatyzacją procesów biznesowych.",
+keywords: [
+"Paweł Drwal o mnie",
+"Pawel Drwal",
+"Student Inżynierii Danych",
+"Akademia Tarnowska",
+"Data Engineering",
+"Python",
+"SQL",
+"Machine Learning",
+"Data Science",
+"Data Analytics",
+"Power BI",
+"PostgreSQL",
+"PySpark",
+"Big Data",
+"ETL",
+"Data Warehouse",
+"Business Intelligence",
+"Computer Vision",
+"Deep Learning",
+"Java",
+"Kotlin",
+"Android",
+"Camunda",
+"BPMN",
+"Automatyzacja procesów",
+"Projekty IT",
+"Portfolio programisty",
+"Junior Data Engineer",
+"Junior Data Analyst",
+"Junior Python Developer",
+"Rozwój zawodowy IT",
+],
+alternates: {
+canonical: "/about",
+},
+openGraph: {
+type: "profile",
+url: "/about",
+siteName: "Paweł Drwal Portfolio",
+locale: "pl_PL",
+title: "O mnie | Paweł Drwal",
+description:
+"Student Inżynierii Danych rozwijający projekty w Pythonie, SQL, Data Engineering, Machine Learning i analityce danych.",
+},
 };
+
 
 const POINTS = [
   ["Analiza danych", "Przeglądam dane, szukam trendów i sprawdzam, czy to, co widać, ma sens."],
