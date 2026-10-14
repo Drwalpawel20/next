@@ -1,18 +1,21 @@
 import type { MetadataRoute } from "next";
 
+export const dynamic = "force-static";
+
 export default function sitemap(): MetadataRoute.Sitemap {
-const baseUrl = "https://paweldrwal.vercel.app";
+const baseUrl =
+process.env.NEXT_PUBLIC_SITE_URL ?? "https://paweldrwal.vercel.app";
 
 return [
 {
 url: baseUrl,
-lastModified: new Date(),
+lastModified: new Date("2026-10-14"),
 changeFrequency: "monthly",
 priority: 1,
 },
 {
 url: `${baseUrl}/about`,
-lastModified: new Date(),
+lastModified: new Date("2026-10-14"),
 changeFrequency: "monthly",
 priority: 0.8,
 },
