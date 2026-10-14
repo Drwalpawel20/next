@@ -10,6 +10,6 @@ export const SITE = {
   github: "https://github.com/Drwalpawel20",
   ga: "G-F06DSBTWTC",
   // Kody weryfikacji Google Search Console. Dotychczasowy plus dwa dla tego projektu.
-  verification: "Jw4kLc6CY-Bh77x0zQh0P4lqgCo1pplHDn7jBxOZKng",
+  verification: "sMx_gncgn2NERU6nRe7B_-R_OQFpmHu5S3PRsxCx1hc",
   cdn: "https://d1yei2z3i6k35z.cloudfront.net",
 };
