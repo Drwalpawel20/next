@@ -187,8 +187,10 @@ export default function FireSmokeDemo() {
         input[2 * SIZE * SIZE + i] = rgba[i * 4 + 2] / 255;
       }
       const tensor = new ort.Tensor("float32", input, [1, 3, SIZE, SIZE]);
-      const result = await sessionRef.current.run({ [sessionRef.current.inputNames[0]]: tensor });
-      const output = result[sessionRef.current.outputNames[0]];
+      const session = sessionRef.current;
+      if (!session) throw new Error("Sesja modelu nie jest gotowa.");
+      const result = await session.run({ [session.inputNames[0]]: tensor });
+      const output = result[session.outputNames[0]];
       const boxes = decode(output.data as Float32Array, w, h, scale, padX, padY, confidenceRef.current);
       ctx.clearRect(0, 0, w, h);
       const ratio = Math.max(1, w / 960);
