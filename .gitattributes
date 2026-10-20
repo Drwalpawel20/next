@@ -1,6 +1,0 @@
-drwal-next/**/*.onnx filter=lfs diff=lfs merge=lfs -text
-drwal-next/**/*.keras filter=lfs diff=lfs merge=lfs -text
-drwal-next/**/*.h5 filter=lfs diff=lfs merge=lfs -text
-drwal-next/**/*.pt filter=lfs diff=lfs merge=lfs -text
-drwal-next/**/*.pth filter=lfs diff=lfs merge=lfs -text
-drwal-next/**/*.zip filter=lfs diff=lfs merge=lfs -text
