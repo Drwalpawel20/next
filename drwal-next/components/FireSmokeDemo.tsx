@@ -38,10 +38,18 @@ function decode(data: Float32Array, width: number, height: number, scale: number
   return kept;
 }
 
+function formatTime(seconds: number) {
+  if (!Number.isFinite(seconds)) return "0:00";
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60).toString().padStart(2, "0");
+  return `${mins}:${secs}`;
+}
+
 export default function FireSmokeDemo() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sessionRef = useRef<InferenceSession | null>(null);
+  const ortRef = useRef<(typeof import("onnxruntime-web") | typeof import("onnxruntime-web/webgpu")) | null>(null);
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const busyRef = useRef(false);
@@ -53,6 +61,8 @@ export default function FireSmokeDemo() {
   const confidenceRef = useRef(0.1);
   const [loading, setLoading] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
   const [status, setStatus] = useState("Wybierz nagranie, aby rozpocząć");
   const [stats, setStats] = useState({ count: 0, top: 0, latency: 0 });
 
@@ -70,6 +80,8 @@ export default function FireSmokeDemo() {
     setFileUrl(url);
     setFileName(file.name);
     setPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
     setStats({ count: 0, top: 0, latency: 0 });
     setStatus("Nagranie gotowe do analizy");
   }, [clearLoop, fileUrl]);
@@ -81,14 +93,15 @@ export default function FireSmokeDemo() {
     const started = performance.now();
     const w = video.videoWidth, h = video.videoHeight;
     if (!w || !h) { busyRef.current = false; return; }
-    canvas.width = w; canvas.height = h;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
     const ctx = canvas.getContext("2d");
     if (!ctx) { busyRef.current = false; return; }
     try {
-      const ort = await import("onnxruntime-web");
       if (!sessionRef.current) {
-        ort.env.wasm.wasmPaths = "/ort/";
-        setStatus("Ładowanie modelu YOLO26s · 38 MB");
+        setStatus("Ładowanie modelu YOLO26s · GPU");
         const response = await fetch("/models/fire-smoke-yolo26s.onnx", { cache: "no-store" });
         if (!response.ok) throw new Error(`Model ONNX nie został pobrany (HTTP ${response.status}).`);
         const modelBytes = new Uint8Array(await response.arrayBuffer());
@@ -98,8 +111,33 @@ export default function FireSmokeDemo() {
           throw new Error(`Pobrany model jest niepełny (${modelBytes.byteLength} B).`);
         }
         if (modelBytes[0] !== 0x08) throw new Error("Pobrany plik nie wygląda na model ONNX.");
-        sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["wasm"] });
+        if ("gpu" in navigator) {
+          try {
+            const ort = await import("onnxruntime-web/webgpu");
+            ort.env.wasm.wasmPaths = "/ort/";
+            ort.env.webgpu.powerPreference = "high-performance";
+            sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["webgpu", "wasm"] });
+            ortRef.current = ort;
+          } catch {
+            setStatus("GPU niedostępne · przełączanie na CPU");
+          }
+        }
+        if (!sessionRef.current) {
+          const ort = await import("onnxruntime-web");
+          ort.env.wasm.wasmPaths = "/ort/";
+          ort.env.wasm.proxy = true;
+          try {
+            sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["wasm"] });
+          } catch {
+            ort.env.wasm.proxy = false;
+            sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["wasm"] });
+          }
+          ortRef.current = ort;
+          setStatus("Model działa na CPU · interfejs pozostaje responsywny");
+        }
       }
+      const ort = ortRef.current;
+      if (!ort) throw new Error("Nie udało się uruchomić silnika ONNX.");
       if (!frameCanvasRef.current) frameCanvasRef.current = document.createElement("canvas");
       const frame = frameCanvasRef.current;
       frame.width = SIZE; frame.height = SIZE;
@@ -121,6 +159,7 @@ export default function FireSmokeDemo() {
       const result = await sessionRef.current.run({ [sessionRef.current.inputNames[0]]: tensor });
       const output = result[sessionRef.current.outputNames[0]];
       const boxes = decode(output.data as Float32Array, w, h, scale, padX, padY, confidenceRef.current);
+      ctx.clearRect(0, 0, w, h);
       const ratio = Math.max(1, w / 960);
       ctx.lineWidth = 3 * ratio;
       ctx.font = `600 ${Math.round(16 * ratio)}px system-ui, sans-serif`;
@@ -203,13 +242,18 @@ export default function FireSmokeDemo() {
           <div className="fire-confidence"><label htmlFor="fire-confidence">Pewność detekcji <b>{Math.round(confidence * 100)}%</b></label><input id="fire-confidence" type="range" min="5" max="80" step="5" value={Math.round(confidence * 100)} onChange={(e) => { const value = Number(e.target.value) / 100; confidenceRef.current = value; setConfidence(value); }} /><small>Minimalna pewność wykrycia obiektu</small></div>
           <div className="fire-stage" style={{ aspectRatio: aspect }}>
             {fileUrl ? <>
-              <video ref={videoRef} src={fileUrl} controls playsInline onLoadedMetadata={(e) => setAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight || 16 / 9)} onPlay={() => { setPlaying(true); clearLoop(); lastRunRef.current = 0; rafRef.current = requestAnimationFrame(tick); }} onEnded={() => { clearLoop(); setPlaying(false); setStatus("Analiza zakończona"); }} onPause={() => { clearLoop(); setPlaying(false); }} />
+              <video ref={videoRef} src={fileUrl} playsInline preload="metadata" onLoadedMetadata={(e) => { setAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight || 16 / 9); setDuration(e.currentTarget.duration || 0); }} onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)} onSeeked={() => { if (!sessionRef.current || !videoRef.current?.paused) return; void detect(); }} onPlay={() => { setPlaying(true); clearLoop(); lastRunRef.current = 0; rafRef.current = requestAnimationFrame(tick); }} onEnded={() => { clearLoop(); setPlaying(false); setStatus("Analiza zakończona"); }} onPause={() => { clearLoop(); setPlaying(false); }} />
               <canvas ref={canvasRef} aria-label="Klatka wideo z zaznaczonymi detekcjami ognia i dymu" />
             </> : <div className="fire-empty"><span>▶</span><b>Podgląd nagrania</b><small>Wybierz plik wideo, aby zobaczyć detekcje</small></div>}
           </div>
+          {fileUrl && <div className="fire-player" aria-label="Sterowanie nagraniem">
+            <button className="fire-player-toggle" type="button" onClick={playing ? stop : start} disabled={loading} aria-label={playing ? "Wstrzymaj analizę" : "Uruchom analizę"}>{playing ? "Ⅱ" : "▶"}</button>
+            <span className="fire-player-time">{formatTime(currentTime)}</span>
+            <input className="fire-seek" type="range" min="0" max={Math.max(duration, 0.01)} step="0.01" value={Math.min(currentTime, duration || 0)} aria-label="Pozycja nagrania" onChange={(e) => { const time = Number(e.target.value); if (videoRef.current) videoRef.current.currentTime = time; setCurrentTime(time); }} />
+            <span className="fire-player-time">{formatTime(duration)}</span>
+          </div>}
           <div className="fire-controls">
-            <button className="btn primary" onClick={playing ? stop : start} disabled={!fileUrl || loading}>{loading ? "Uruchamianie…" : playing ? "Wstrzymaj analizę" : "Uruchom analizę"}</button>
-            <span className="fire-status"><i className={playing ? "live" : ""} />{status}</span>
+            <span className="fire-status"><i className={playing ? "live" : ""} />{loading ? "Uruchamianie modelu…" : status}</span>
           </div>
           <div className="fire-examples">
             <div><h2>Przykładowe nagrania</h2><p>Klipy demonstracyjne dodamy po otrzymaniu plików wideo — obecnie w katalogu projektu są tylko obrazy testowe.</p></div>
