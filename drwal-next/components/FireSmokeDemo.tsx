@@ -50,6 +50,7 @@ export default function FireSmokeDemo() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sessionRef = useRef<InferenceSession | null>(null);
   const ortRef = useRef<(typeof import("onnxruntime-web") | typeof import("onnxruntime-web/webgpu")) | null>(null);
+  const sessionPromiseRef = useRef<Promise<void> | null>(null);
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const busyRef = useRef(false);
@@ -60,6 +61,8 @@ export default function FireSmokeDemo() {
   const [confidence, setConfidence] = useState(0.1);
   const confidenceRef = useRef(0.1);
   const [loading, setLoading] = useState(false);
+  const [modelState, setModelState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [modelError, setModelError] = useState("");
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -71,10 +74,73 @@ export default function FireSmokeDemo() {
     rafRef.current = null;
   }, []);
 
+  const ensureSession = useCallback(() => {
+    if (sessionRef.current && ortRef.current) {
+      setModelState("ready");
+      setStatus("Model gotowy. Możesz uruchomić analizę.");
+      return Promise.resolve();
+    }
+    if (sessionPromiseRef.current) return sessionPromiseRef.current;
+
+    setModelState("loading");
+    setModelError("");
+    setStatus("Przygotowujemy model do analizy. Pierwsze ładowanie może potrwać chwilę.");
+    const task = (async () => {
+      const response = await fetch("/models/fire-smoke-yolo26s.onnx", { cache: "no-store" });
+      if (!response.ok) throw new Error(`Model ONNX nie został pobrany (HTTP ${response.status}).`);
+      const modelBytes = new Uint8Array(await response.arrayBuffer());
+      if (modelBytes.byteLength < 1024 * 1024) {
+        const preview = new TextDecoder().decode(modelBytes.subarray(0, 200));
+        if (preview.includes("git-lfs.github.com/spec")) throw new Error("Serwer zwrócił wskaźnik Git LFS zamiast modelu ONNX.");
+        throw new Error(`Pobrany model jest niepełny (${modelBytes.byteLength} B).`);
+      }
+      if (modelBytes[0] !== 0x08) throw new Error("Pobrany plik nie wygląda na model ONNX.");
+
+      if ("gpu" in navigator) {
+        try {
+          const ort = await import("onnxruntime-web/webgpu");
+          ort.env.wasm.wasmPaths = "/ort/";
+          ort.env.webgpu.powerPreference = "high-performance";
+          sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["webgpu", "wasm"] });
+          ortRef.current = ort;
+        } catch {
+          setStatus("Akceleracja GPU jest niedostępna. Przygotowujemy model do pracy na CPU.");
+        }
+      }
+      if (!sessionRef.current) {
+        const ort = await import("onnxruntime-web");
+        ort.env.wasm.wasmPaths = "/ort/";
+        ort.env.wasm.proxy = true;
+        try {
+          sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["wasm"] });
+        } catch {
+          ort.env.wasm.proxy = false;
+          sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["wasm"] });
+        }
+        ortRef.current = ort;
+      }
+      if (!sessionRef.current || !ortRef.current) throw new Error("Nie udało się uruchomić silnika ONNX.");
+    })().then(() => {
+      setModelState("ready");
+      setStatus("Model gotowy. Możesz uruchomić analizę.");
+    }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : "Nie udało się przygotować modelu.";
+      setModelState("error");
+      setModelError(message);
+      setStatus("Nie udało się przygotować modelu.");
+      throw error;
+    }).finally(() => {
+      sessionPromiseRef.current = null;
+    });
+    sessionPromiseRef.current = task;
+    return task;
+  }, []);
+
   const chooseFile = useCallback((file?: File) => {
     if (!file) return;
     if (!file.type.startsWith("video/")) { setStatus("Wybierz plik wideo, np. MP4, WebM lub MOV."); return; }
     clearLoop();
+    videoRef.current?.pause();
     if (fileUrl) URL.revokeObjectURL(fileUrl);
     const url = URL.createObjectURL(file);
     setFileUrl(url);
@@ -83,8 +149,8 @@ export default function FireSmokeDemo() {
     setCurrentTime(0);
     setDuration(0);
     setStats({ count: 0, top: 0, latency: 0 });
-    setStatus("Nagranie gotowe do analizy");
-  }, [clearLoop, fileUrl]);
+    void ensureSession().catch(() => {});
+  }, [clearLoop, ensureSession, fileUrl]);
 
   const detect = useCallback(async () => {
     const video = videoRef.current, canvas = canvasRef.current;
@@ -100,42 +166,7 @@ export default function FireSmokeDemo() {
     const ctx = canvas.getContext("2d");
     if (!ctx) { busyRef.current = false; return; }
     try {
-      if (!sessionRef.current) {
-        setStatus("Ładowanie modelu YOLO26s · GPU");
-        const response = await fetch("/models/fire-smoke-yolo26s.onnx", { cache: "no-store" });
-        if (!response.ok) throw new Error(`Model ONNX nie został pobrany (HTTP ${response.status}).`);
-        const modelBytes = new Uint8Array(await response.arrayBuffer());
-        if (modelBytes.byteLength < 1024 * 1024) {
-          const preview = new TextDecoder().decode(modelBytes.subarray(0, 200));
-          if (preview.includes("git-lfs.github.com/spec")) throw new Error("Serwer zwrócił wskaźnik Git LFS zamiast modelu ONNX.");
-          throw new Error(`Pobrany model jest niepełny (${modelBytes.byteLength} B).`);
-        }
-        if (modelBytes[0] !== 0x08) throw new Error("Pobrany plik nie wygląda na model ONNX.");
-        if ("gpu" in navigator) {
-          try {
-            const ort = await import("onnxruntime-web/webgpu");
-            ort.env.wasm.wasmPaths = "/ort/";
-            ort.env.webgpu.powerPreference = "high-performance";
-            sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["webgpu", "wasm"] });
-            ortRef.current = ort;
-          } catch {
-            setStatus("GPU niedostępne · przełączanie na CPU");
-          }
-        }
-        if (!sessionRef.current) {
-          const ort = await import("onnxruntime-web");
-          ort.env.wasm.wasmPaths = "/ort/";
-          ort.env.wasm.proxy = true;
-          try {
-            sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["wasm"] });
-          } catch {
-            ort.env.wasm.proxy = false;
-            sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["wasm"] });
-          }
-          ortRef.current = ort;
-          setStatus("Model działa na CPU · interfejs pozostaje responsywny");
-        }
-      }
+      await ensureSession();
       const ort = ortRef.current;
       if (!ort) throw new Error("Nie udało się uruchomić silnika ONNX.");
       if (!frameCanvasRef.current) frameCanvasRef.current = document.createElement("canvas");
@@ -184,7 +215,7 @@ export default function FireSmokeDemo() {
     } finally {
       busyRef.current = false;
     }
-  }, [clearLoop]);
+  }, [clearLoop, ensureSession]);
 
   const tick = useCallback((time: number) => {
     const video = videoRef.current;
@@ -198,7 +229,7 @@ export default function FireSmokeDemo() {
 
   const start = async () => {
     const video = videoRef.current;
-    if (!video || !fileUrl) return;
+    if (!video || !fileUrl || modelState !== "ready" || !sessionRef.current) return;
     setLoading(true);
     setStatus("Przygotowanie modelu i nagrania…");
     try {
@@ -242,12 +273,12 @@ export default function FireSmokeDemo() {
           <div className="fire-confidence"><label htmlFor="fire-confidence">Pewność detekcji <b>{Math.round(confidence * 100)}%</b></label><input id="fire-confidence" type="range" min="5" max="80" step="5" value={Math.round(confidence * 100)} onChange={(e) => { const value = Number(e.target.value) / 100; confidenceRef.current = value; setConfidence(value); }} /><small>Minimalna pewność wykrycia obiektu</small></div>
           <div className="fire-stage" style={{ aspectRatio: aspect }}>
             {fileUrl ? <>
-              <video ref={videoRef} src={fileUrl} playsInline preload="metadata" onLoadedMetadata={(e) => { setAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight || 16 / 9); setDuration(e.currentTarget.duration || 0); }} onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)} onSeeked={() => { if (!sessionRef.current || !videoRef.current?.paused) return; void detect(); }} onPlay={() => { setPlaying(true); clearLoop(); lastRunRef.current = 0; rafRef.current = requestAnimationFrame(tick); }} onEnded={() => { clearLoop(); setPlaying(false); setStatus("Analiza zakończona"); }} onPause={() => { clearLoop(); setPlaying(false); }} />
+              <video ref={videoRef} src={fileUrl} playsInline preload="metadata" onLoadedMetadata={(e) => { setAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight || 16 / 9); setDuration(e.currentTarget.duration || 0); }} onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)} onSeeked={() => { if (!sessionRef.current || !videoRef.current?.paused) return; void detect(); }} onPlay={(e) => { if (modelState !== "ready" || !sessionRef.current) { e.currentTarget.pause(); return; } setPlaying(true); clearLoop(); lastRunRef.current = 0; rafRef.current = requestAnimationFrame(tick); }} onEnded={() => { clearLoop(); setPlaying(false); setStatus("Analiza zakończona"); }} onPause={() => { clearLoop(); setPlaying(false); }} />
               <canvas ref={canvasRef} aria-label="Klatka wideo z zaznaczonymi detekcjami ognia i dymu" />
             </> : <div className="fire-empty"><span>▶</span><b>Podgląd nagrania</b><small>Wybierz plik wideo, aby zobaczyć detekcje</small></div>}
           </div>
           {fileUrl && <div className="fire-player" aria-label="Sterowanie nagraniem">
-            <button className="fire-player-toggle" type="button" onClick={playing ? stop : start} disabled={loading} aria-label={playing ? "Wstrzymaj analizę" : "Uruchom analizę"}>{playing ? "Ⅱ" : "▶"}</button>
+            <button className="fire-player-toggle" type="button" onClick={playing ? stop : start} disabled={loading || modelState !== "ready"} aria-label={playing ? "Wstrzymaj analizę" : "Uruchom analizę"}>{playing ? "Ⅱ" : "▶"}</button>
             <span className="fire-player-time">{formatTime(currentTime)}</span>
             <input className="fire-seek" type="range" min="0" max={Math.max(duration, 0.01)} step="0.01" value={Math.min(currentTime, duration || 0)} aria-label="Pozycja nagrania" onChange={(e) => { const time = Number(e.target.value); if (videoRef.current) videoRef.current.currentTime = time; setCurrentTime(time); }} />
             <span className="fire-player-time">{formatTime(duration)}</span>
@@ -255,6 +286,8 @@ export default function FireSmokeDemo() {
           <div className="fire-controls">
             <span className="fire-status"><i className={playing ? "live" : ""} />{loading ? "Uruchamianie modelu…" : status}</span>
           </div>
+          {modelState === "loading" && <p className="fire-model-note" role="status">Przygotowanie modelu może potrwać chwilę. Analizę będzie można uruchomić po zakończeniu.</p>}
+          {modelState === "error" && <div className="fire-model-error"><p>{modelError}</p><button className="btn" type="button" onClick={() => { void ensureSession().catch(() => {}); }}>Ponów przygotowanie modelu</button></div>}
           <div className="fire-examples">
             <div><h2>Przykładowe nagrania</h2><p>Klipy demonstracyjne dodamy po otrzymaniu plików wideo — obecnie w katalogu projektu są tylko obrazy testowe.</p></div>
             <span className="example-pending">Materiały wideo nie zostały dostarczone</span>
