@@ -4,7 +4,7 @@ import type { InferenceSession } from "onnxruntime-web";
 
 type Box = { x: number; y: number; w: number; h: number; score: number; cls: number };
 const SIZE = 640;
-const THRESHOLD = 0.15;
+
 const IOU_THRESHOLD = 0.45;
 const CLASSES = ["Smoke", "Fire"];
 
@@ -15,13 +15,13 @@ function iou(a: Box, b: Box) {
   return intersection / (a.w * a.h + b.w * b.h - intersection + 1e-6);
 }
 
-function decode(data: Float32Array, width: number, height: number, scale: number, padX: number, padY: number): Box[] {
+function decode(data: Float32Array, width: number, height: number, scale: number, padX: number, padY: number, threshold: number): Box[] {
   const count = 8400;
   const candidates: Box[] = [];
   for (let i = 0; i < count; i++) {
     const smoke = data[4 * count + i], fire = data[5 * count + i];
     const cls = fire > smoke ? 1 : 0, score = Math.max(smoke, fire);
-    if (score < THRESHOLD) continue;
+    if (score < threshold) continue;
     const cx = data[i], cy = data[count + i], bw = data[2 * count + i], bh = data[3 * count + i];
     const x = Math.max(0, Math.min(width, (cx - bw / 2 - padX) / scale));
     const y = Math.max(0, Math.min(height, (cy - bh / 2 - padY) / scale));
@@ -49,6 +49,8 @@ export default function FireSmokeDemo() {
   const [fileUrl, setFileUrl] = useState("");
   const [fileName, setFileName] = useState("");
   const [aspect, setAspect] = useState(16 / 9);
+  const [confidence, setConfidence] = useState(0.1);
+  const confidenceRef = useRef(0.1);
   const [loading, setLoading] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [status, setStatus] = useState("Wybierz nagranie, aby rozpocząć");
@@ -57,7 +59,6 @@ export default function FireSmokeDemo() {
   const clearLoop = useCallback(() => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
-    busyRef.current = false;
   }, []);
 
   const chooseFile = useCallback((file?: File) => {
@@ -98,7 +99,7 @@ export default function FireSmokeDemo() {
       const scale = Math.min(SIZE / w, SIZE / h);
       const drawW = Math.round(w * scale), drawH = Math.round(h * scale);
       const padX = (SIZE - drawW) / 2, padY = (SIZE - drawH) / 2;
-      fctx.fillStyle = "#000"; fctx.fillRect(0, 0, SIZE, SIZE);
+      fctx.fillStyle = "rgb(114, 114, 114)"; fctx.fillRect(0, 0, SIZE, SIZE);
       fctx.drawImage(video, padX, padY, drawW, drawH);
       const rgba = fctx.getImageData(0, 0, SIZE, SIZE).data;
       const input = new Float32Array(3 * SIZE * SIZE);
@@ -110,7 +111,7 @@ export default function FireSmokeDemo() {
       const tensor = new ort.Tensor("float32", input, [1, 3, SIZE, SIZE]);
       const result = await sessionRef.current.run({ [sessionRef.current.inputNames[0]]: tensor });
       const output = result[sessionRef.current.outputNames[0]];
-      const boxes = decode(output.data as Float32Array, w, h, scale, padX, padY);
+      const boxes = decode(output.data as Float32Array, w, h, scale, padX, padY, confidenceRef.current);
       const ratio = Math.max(1, w / 960);
       ctx.lineWidth = 3 * ratio;
       ctx.font = `600 ${Math.round(16 * ratio)}px system-ui, sans-serif`;
@@ -129,8 +130,9 @@ export default function FireSmokeDemo() {
       setStatus(boxes.length ? "Detekcja aktywna" : "Analiza trwa · nie wykryto obiektów w tej klatce");
     } catch (error) {
       clearLoop();
+      video.pause();
       setPlaying(false);
-      setStatus(error instanceof Error ? error.message : "Nie udało się uruchomić modelu.");
+      setStatus(error instanceof Error ? `Błąd modelu: ${error.message}` : "Nie udało się uruchomić modelu.");
     } finally {
       busyRef.current = false;
     }
@@ -189,9 +191,10 @@ export default function FireSmokeDemo() {
             <span className="upload-icon">↥</span><span><b>{fileName || "Wybierz lub upuść nagranie"}</b><small>MP4, WebM, MOV · plik przetwarzany lokalnie</small></span>
             <span className="btn">Przeglądaj pliki</span>
           </label>
+          <div className="fire-confidence"><label htmlFor="fire-confidence">Pewność detekcji <b>{Math.round(confidence * 100)}%</b></label><input id="fire-confidence" type="range" min="5" max="80" step="5" value={Math.round(confidence * 100)} onChange={(e) => { const value = Number(e.target.value) / 100; confidenceRef.current = value; setConfidence(value); }} /><small>Minimalna pewność wykrycia obiektu</small></div>
           <div className="fire-stage" style={{ aspectRatio: aspect }}>
             {fileUrl ? <>
-              <video ref={videoRef} src={fileUrl} controls playsInline onLoadedMetadata={(e) => setAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight || 16 / 9)} onEnded={() => { clearLoop(); setPlaying(false); setStatus("Analiza zakończona"); }} onPause={() => { if (playing) { clearLoop(); setPlaying(false); } }} />
+              <video ref={videoRef} src={fileUrl} controls playsInline onLoadedMetadata={(e) => setAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight || 16 / 9)} onPlay={() => { setPlaying(true); clearLoop(); lastRunRef.current = 0; rafRef.current = requestAnimationFrame(tick); }} onEnded={() => { clearLoop(); setPlaying(false); setStatus("Analiza zakończona"); }} onPause={() => { clearLoop(); setPlaying(false); }} />
               <canvas ref={canvasRef} aria-label="Klatka wideo z zaznaczonymi detekcjami ognia i dymu" />
             </> : <div className="fire-empty"><span>▶</span><b>Podgląd nagrania</b><small>Wybierz plik wideo, aby zobaczyć detekcje</small></div>}
           </div>
@@ -206,7 +209,7 @@ export default function FireSmokeDemo() {
         </div>
         <aside className="fire-side">
           <p className="fire-side-label">WYNIK NA ŻYWO</p>
-          <div className="fire-metric"><span>Detekcje na klatce</span><b>{stats.count}</b></div>
+          <div className="fire-metric"><span>Boxy na klatce wideo</span><b>{stats.count}</b></div>
           <div className="fire-metric"><span>Najwyższa pewność</span><b>{stats.top ? `${(stats.top * 100).toFixed(1)}%` : "—"}</b></div>
           <div className="fire-metric"><span>Czas inferencji</span><b>{stats.latency ? `${stats.latency.toFixed(0)} ms` : "—"}</b></div>
           <div className="fire-legend"><span><i className="fire-dot" /> Ogień</span><span><i className="smoke-dot" /> Dym</span></div>
@@ -216,6 +219,10 @@ export default function FireSmokeDemo() {
     </section>
   );
 }
+
+
+
+
 
 
 

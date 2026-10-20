@@ -1,3 +1,4 @@
+import "./scripts/copy-ort-assets.mjs";
 /** Statyczny eksport: najszybsze ładowanie i hosting na GitHub Pages (drwalpawel20.github.io). */
 const nextConfig = {
   output: "export",
@@ -5,3 +6,4 @@ const nextConfig = {
   reactStrictMode: true,
 };
 export default nextConfig;
+
