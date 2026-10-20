@@ -89,7 +89,16 @@ export default function FireSmokeDemo() {
       if (!sessionRef.current) {
         ort.env.wasm.wasmPaths = "/ort/";
         setStatus("Ładowanie modelu YOLO26s · 38 MB");
-        sessionRef.current = await ort.InferenceSession.create("/models/fire-smoke-yolo26s.onnx", { executionProviders: ["wasm"] });
+        const response = await fetch("/models/fire-smoke-yolo26s.onnx", { cache: "no-store" });
+        if (!response.ok) throw new Error(`Model ONNX nie został pobrany (HTTP ${response.status}).`);
+        const modelBytes = new Uint8Array(await response.arrayBuffer());
+        if (modelBytes.byteLength < 1024 * 1024) {
+          const preview = new TextDecoder().decode(modelBytes.subarray(0, 200));
+          if (preview.includes("git-lfs.github.com/spec")) throw new Error("Serwer zwrócił wskaźnik Git LFS zamiast modelu ONNX.");
+          throw new Error(`Pobrany model jest niepełny (${modelBytes.byteLength} B).`);
+        }
+        if (modelBytes[0] !== 0x08) throw new Error("Pobrany plik nie wygląda na model ONNX.");
+        sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["wasm"] });
       }
       if (!frameCanvasRef.current) frameCanvasRef.current = document.createElement("canvas");
       const frame = frameCanvasRef.current;
