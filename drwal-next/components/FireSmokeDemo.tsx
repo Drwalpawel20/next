@@ -3,8 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { InferenceSession } from "onnxruntime-web";
 
 type Box = { x: number; y: number; w: number; h: number; score: number; cls: number };
-const SIZE = 640;
 
+const SIZE = 640;
 const IOU_THRESHOLD = 0.45;
 const CLASSES = ["Smoke", "Fire"];
 const DEMO_VIDEO = "/videos/demo_yolo_vid_1.mp4";
@@ -46,6 +46,19 @@ function formatTime(seconds: number) {
   return `${mins}:${secs}`;
 }
 
+/** Sprawdza, czy blob wygląda na prawidłowy plik MP4 */
+async function isValidMp4(blob: Blob): Promise<boolean> {
+  if (blob.size < 10_000) return false; // za mały
+  const header = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+  // ftyp box (ISO BMFF / MP4)
+  const isFtyp =
+    header[4] === 0x66 && // f
+    header[5] === 0x74 && // t
+    header[6] === 0x79 && // y
+    header[7] === 0x70;  // p
+  return isFtyp;
+}
+
 export default function FireSmokeDemo() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -56,6 +69,7 @@ export default function FireSmokeDemo() {
   const rafRef = useRef<number | null>(null);
   const busyRef = useRef(false);
   const lastRunRef = useRef(0);
+
   const [fileUrl, setFileUrl] = useState("");
   const [fileName, setFileName] = useState("");
   const [aspect, setAspect] = useState(16 / 9);
@@ -82,7 +96,6 @@ export default function FireSmokeDemo() {
       return Promise.resolve();
     }
     if (sessionPromiseRef.current) return sessionPromiseRef.current;
-
     setModelState("loading");
     setModelError("");
     setStatus("Przygotowujemy model do analizy. Pierwsze ładowanie może potrwać chwilę.");
@@ -96,7 +109,6 @@ export default function FireSmokeDemo() {
         throw new Error(`Pobrany model jest niepełny (${modelBytes.byteLength} B).`);
       }
       if (modelBytes[0] !== 0x08) throw new Error("Pobrany plik nie wygląda na model ONNX.");
-
       if ("gpu" in navigator) {
         try {
           const ort = await import("onnxruntime-web/webgpu");
@@ -121,47 +133,73 @@ export default function FireSmokeDemo() {
         ortRef.current = ort;
       }
       if (!sessionRef.current || !ortRef.current) throw new Error("Nie udało się uruchomić silnika ONNX.");
-    })().then(() => {
-      setModelState("ready");
-      setStatus("Model gotowy. Możesz uruchomić analizę.");
-    }).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : "Nie udało się przygotować modelu.";
-      setModelState("error");
-      setModelError(message);
-      setStatus("Nie udało się przygotować modelu.");
-      throw error;
-    }).finally(() => {
-      sessionPromiseRef.current = null;
-    });
+    })()
+      .then(() => {
+        setModelState("ready");
+        setStatus("Model gotowy. Możesz uruchomić analizę.");
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "Nie udało się przygotować modelu.";
+        setModelState("error");
+        setModelError(message);
+        setStatus("Nie udało się przygotować modelu.");
+        throw error;
+      })
+      .finally(() => {
+        sessionPromiseRef.current = null;
+      });
     sessionPromiseRef.current = task;
     return task;
   }, []);
 
-  const chooseFile = useCallback((file?: File) => {
-    if (!file) return;
-    if (!file.type.startsWith("video/")) {
-      setStatus("Wybierz plik wideo, np. MP4, WebM lub MOV.");
-      return;
+  const chooseFile = useCallback(
+    (file?: File) => {
+      if (!file) return;
+      if (!file.type.startsWith("video/")) {
+        setStatus("Wybierz plik wideo, np. MP4, WebM lub MOV.");
+        return;
+      }
+      clearLoop();
+      videoRef.current?.pause();
+      if (fileUrl.startsWith("blob:")) URL.revokeObjectURL(fileUrl);
+      const url = URL.createObjectURL(file);
+      setFileUrl(url);
+      setFileName(file.name);
+      setPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+      setStats({ count: 0, top: 0, latency: 0 });
+      void ensureSession().catch(() => {});
+    },
+    [clearLoop, ensureSession, fileUrl]
+  );
+
+  const loadDemoVideo = useCallback(async () => {
+    setStatus("Wczytywanie przykładowego nagrania…");
+    const response = await fetch(DEMO_VIDEO, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`Nie udało się pobrać filmu (HTTP ${response.status}).`);
     }
-    clearLoop();
-    videoRef.current?.pause();
-    if (fileUrl.startsWith("blob:")) URL.revokeObjectURL(fileUrl);
-    const url = URL.createObjectURL(file);
-    setFileUrl(url);
-    setFileName(file.name);
-    setPlaying(false);
-    setCurrentTime(0);
-    setDuration(0);
-    setStats({ count: 0, top: 0, latency: 0 });
-    void ensureSession().catch(() => {});
-  }, [clearLoop, ensureSession, fileUrl]);
+    const blob = await response.blob();
+
+    if (!(await isValidMp4(blob))) {
+      throw new Error(
+        `Plik demo jest nieprawidłowy (${blob.size} B). Upewnij się, że w public/videos/demo_yolo_vid_1.mp4 leży prawdziwy plik MP4 (nie wskaźnik Git LFS).`
+      );
+    }
+
+    const file = new File([blob], "demo_yolo_vid_1.mp4", { type: "video/mp4" });
+    chooseFile(file);
+  }, [chooseFile]);
 
   const detect = useCallback(async () => {
-    const video = videoRef.current, canvas = canvasRef.current;
+    const video = videoRef.current,
+      canvas = canvasRef.current;
     if (!video || !canvas || video.readyState < 2 || busyRef.current) return;
     busyRef.current = true;
     const started = performance.now();
-    const w = video.videoWidth, h = video.videoHeight;
+    const w = video.videoWidth,
+      h = video.videoHeight;
     if (!w || !h) {
       busyRef.current = false;
       return;
@@ -186,8 +224,10 @@ export default function FireSmokeDemo() {
       const fctx = frame.getContext("2d", { willReadFrequently: true });
       if (!fctx) throw new Error("Nie udało się przygotować klatki wideo.");
       const scale = Math.min(SIZE / w, SIZE / h);
-      const drawW = Math.round(w * scale), drawH = Math.round(h * scale);
-      const padX = (SIZE - drawW) / 2, padY = (SIZE - drawH) / 2;
+      const drawW = Math.round(w * scale),
+        drawH = Math.round(h * scale);
+      const padX = (SIZE - drawW) / 2,
+        padY = (SIZE - drawH) / 2;
       fctx.fillStyle = "rgb(114, 114, 114)";
       fctx.fillRect(0, 0, SIZE, SIZE);
       fctx.drawImage(video, padX, padY, drawW, drawH);
@@ -214,7 +254,8 @@ export default function FireSmokeDemo() {
         ctx.strokeStyle = color;
         ctx.fillStyle = color;
         ctx.strokeRect(box.x, box.y, box.w, box.h);
-        const labelW = ctx.measureText(label).width + 16, labelH = 27 * ratio;
+        const labelW = ctx.measureText(label).width + 16,
+          labelH = 27 * ratio;
         const labelY = Math.max(0, box.y - labelH);
         ctx.fillRect(box.x, labelY, labelW, labelH);
         ctx.fillStyle = "#08101b";
@@ -232,18 +273,21 @@ export default function FireSmokeDemo() {
     }
   }, [clearLoop, ensureSession]);
 
-  const tick = useCallback((time: number) => {
-    const video = videoRef.current;
-    if (!video || video.paused || video.ended) {
-      rafRef.current = null;
-      return;
-    }
-    if (time - lastRunRef.current > 220 && !busyRef.current) {
-      lastRunRef.current = time;
-      void detect();
-    }
-    rafRef.current = requestAnimationFrame(tick);
-  }, [detect]);
+  const tick = useCallback(
+    (time: number) => {
+      const video = videoRef.current;
+      if (!video || video.paused || video.ended) {
+        rafRef.current = null;
+        return;
+      }
+      if (time - lastRunRef.current > 220 && !busyRef.current) {
+        lastRunRef.current = time;
+        void detect();
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    },
+    [detect]
+  );
 
   const start = async () => {
     const video = videoRef.current;
@@ -275,199 +319,246 @@ export default function FireSmokeDemo() {
     setStatus("Analiza wstrzymana");
   };
 
+  // Auto-load demo (tylko jeśli plik jest poprawny)
   useEffect(() => {
-  let cancelled = false;
-
-  const loadDemo = async () => {
-    try {
-      setStatus("Wczytywanie przykładowego nagrania…");
-
-      const response = await fetch(DEMO_VIDEO, { cache: "no-store" });
-
-      if (!response.ok) {
-        throw new Error(`Nie udało się pobrać filmu: HTTP ${response.status}`);
+    let cancelled = false;
+    const loadDemo = async () => {
+      try {
+        await loadDemoVideo();
+      } catch (error) {
+        if (cancelled) return;
+        console.error("Błąd wczytywania demo:", error);
+        setStatus(
+          error instanceof Error
+            ? `Nie udało się wczytać demo: ${error.message}`
+            : "Nie udało się wczytać przykładowego nagrania."
+        );
       }
+    };
+    void loadDemo();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadDemoVideo]);
 
-      const blob = await response.blob();
-
-      if (blob.size < 1000) {
-        throw new Error(`Plik demo jest nieprawidłowy: ${blob.size} B.`);
-      }
-
-      if (cancelled) return;
-
-      const file = new File([blob], "demo_yolo_vid_1.mp4", {
-        type: "video/mp4",
-      });
-
-      chooseFile(file);
-    } catch (error) {
-      if (cancelled) return;
-
-      console.error("Błąd wczytywania demo:", error);
-      setStatus(
-        error instanceof Error
-          ? `Nie udało się wczytać demo: ${error.message}`
-          : "Nie udało się wczytać przykładowego nagrania."
-      );
+  // Autoplay po wczytaniu demo + gotowym modelu
+  useEffect(() => {
+    if (fileName !== "demo_yolo_vid_1.mp4" || !fileUrl || modelState !== "ready") {
+      return;
     }
-  };
-
-  void loadDemo();
-
-  return () => {
-    cancelled = true;
-  };
-}, [chooseFile]);
-
-useEffect(() => {
-  if (
-    fileName !== "demo_yolo_vid_1.mp4" ||
-    !fileUrl ||
-    modelState !== "ready"
-  ) {
-    return;
-  }
-
-  const video = videoRef.current;
-  if (!video) return;
-
-  let cancelled = false;
-
-  const autoplay = async () => {
-    try {
-      if (video.readyState < 2) {
-        await new Promise<void>((resolve, reject) => {
-          const onReady = () => {
-            cleanup();
-            resolve();
-          };
-
-          const onError = () => {
-            cleanup();
-            reject(new Error("Nie udało się odczytać filmu demo."));
-          };
-
-          const cleanup = () => {
-            video.removeEventListener("loadeddata", onReady);
-            video.removeEventListener("error", onError);
-          };
-
-          video.addEventListener("loadeddata", onReady, { once: true });
-          video.addEventListener("error", onError, { once: true });
-
-          if (video.readyState >= 2) {
-            cleanup();
-            resolve();
-          }
-        });
+    const video = videoRef.current;
+    if (!video) return;
+    let cancelled = false;
+    const autoplay = async () => {
+      try {
+        if (video.readyState < 2) {
+          await new Promise<void>((resolve, reject) => {
+            const onReady = () => {
+              cleanup();
+              resolve();
+            };
+            const onError = () => {
+              cleanup();
+              reject(new Error("Nie udało się odczytać filmu demo."));
+            };
+            const cleanup = () => {
+              video.removeEventListener("loadeddata", onReady);
+              video.removeEventListener("error", onError);
+            };
+            video.addEventListener("loadeddata", onReady, { once: true });
+            video.addEventListener("error", onError, { once: true });
+            if (video.readyState >= 2) {
+              cleanup();
+              resolve();
+            }
+          });
+        }
+        if (cancelled) return;
+        video.muted = true;
+        await video.play();
+      } catch (error) {
+        if (cancelled) return;
+        console.error("Automatyczne uruchomienie demo nie powiodło się:", error);
+        setStatus("Film wczytany. Kliknij ▶, aby rozpocząć analizę.");
       }
-
-      if (cancelled) return;
-
-      video.muted = true;
-      await video.play();
-      // Istniejący onPlay uruchomi pętlę detekcji.
-    } catch (error) {
-      if (cancelled) return;
-
-      console.error("Automatyczne uruchomienie demo nie powiodło się:", error);
-      setStatus("Film wczytany. Kliknij ▶, aby rozpocząć analizę.");
-    }
-  };
-
-  void autoplay();
-
-  return () => {
-    cancelled = true;
-  };
-}, [fileName, fileUrl, modelState]);
+    };
+    void autoplay();
+    return () => {
+      cancelled = true;
+    };
+  }, [fileName, fileUrl, modelState]);
 
   return (
     <section className="fire-demo wrap" aria-labelledby="fire-title">
-      <a className="demo-back" href="/demos">← Wszystkie dema</a>
+      <a className="demo-back" href="/demos">
+        ← Wszystkie dema
+      </a>
       <div className="fire-intro">
-        <p className="demo-kicker"><i className="live" /> YOLO26S · DETEKCJA WIDEO</p>
-        <h1 id="fire-title">Ogień i dym<span className="accent">.</span></h1>
-        <p>Wybierz własne nagranie. Model wykrywa ogień i dym bezpośrednio w przeglądarce, a plik pozostaje na Twoim urządzeniu.</p>
+        <p className="demo-kicker">
+          <i className="live" /> YOLO26S · DETEKCJA WIDEO
+        </p>
+        <h1 id="fire-title">
+          Ogień i dym<span className="accent">.</span>
+        </h1>
+        <p>
+          Wybierz własne nagranie. Model wykrywa ogień i dym bezpośrednio w przeglądarce, a plik pozostaje na Twoim
+          urządzeniu.
+        </p>
       </div>
       <div className="fire-layout">
         <div className="fire-main">
-          <label className="fire-upload" onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); chooseFile(e.dataTransfer.files[0]); }}>
+          <label
+            className="fire-upload"
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              chooseFile(e.dataTransfer.files[0]);
+            }}
+          >
             <input type="file" accept="video/*" onChange={(e) => chooseFile(e.target.files?.[0])} />
-            <span className="upload-icon">↥</span><span><b>{fileName || "Wybierz lub upuść nagranie"}</b><small>MP4, WebM, MOV · plik przetwarzany lokalnie</small></span>
+            <span className="upload-icon">↥</span>
+            <span>
+              <b>{fileName || "Wybierz lub upuść nagranie"}</b>
+              <small>MP4, WebM, MOV · plik przetwarzany lokalnie</small>
+            </span>
             <span className="btn">Przeglądaj pliki</span>
           </label>
           <div className="fire-confidence">
-            <label htmlFor="fire-confidence">Pewność detekcji <b>{Math.round(confidence * 100)}%</b></label>
-            <input id="fire-confidence" type="range" min="5" max="80" step="5" value={Math.round(confidence * 100)} onChange={(e) => { const value = Number(e.target.value) / 100; confidenceRef.current = value; setConfidence(value); }} />
+            <label htmlFor="fire-confidence">
+              Pewność detekcji <b>{Math.round(confidence * 100)}%</b>
+            </label>
+            <input
+              id="fire-confidence"
+              type="range"
+              min="5"
+              max="80"
+              step="5"
+              value={Math.round(confidence * 100)}
+              onChange={(e) => {
+                const value = Number(e.target.value) / 100;
+                confidenceRef.current = value;
+                setConfidence(value);
+              }}
+            />
             <small>Minimalna pewność wykrycia obiektu</small>
           </div>
           <div className="fire-stage" style={{ aspectRatio: aspect }}>
-            {fileUrl ? <>
-              <video
-                key={fileUrl}
-                ref={videoRef}
-                src={fileUrl}
-                playsInline
-                muted
-                preload="metadata"
-                onError={(e) => {
-                  const video = e.currentTarget;
-                  const mediaError = video.error;
-                  console.error("Błąd wideo:", {
-                    src: video.currentSrc,
-                    code: mediaError?.code,
-                    message: mediaError?.message,
-                    networkState: video.networkState,
-                    readyState: video.readyState,
-                  });
-                  setStatus(`Nie udało się wczytać filmu. ${mediaError?.message || `Kod błędu: ${mediaError?.code ?? "nieznany"}`}`);
-                }}
-                onLoadedMetadata={(e) => {
-                  setAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight || 16 / 9);
-                  setDuration(e.currentTarget.duration || 0);
-                }}
-                onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                onSeeked={() => {
-                  if (!sessionRef.current || !videoRef.current?.paused) return;
-                  void detect();
-                }}
-                onPlay={(e) => {
-                  if (modelState !== "ready" || !sessionRef.current) {
-                    e.currentTarget.pause();
-                    return;
-                  }
-                  setPlaying(true);
-                  clearLoop();
-                  lastRunRef.current = 0;
-                  rafRef.current = requestAnimationFrame(tick);
-                }}
-                onEnded={() => {
-                  clearLoop();
-                  setPlaying(false);
-                  setStatus("Analiza zakończona");
-                }}
-                onPause={() => {
-                  clearLoop();
-                  setPlaying(false);
+            {fileUrl ? (
+              <>
+                <video
+                  key={fileUrl}
+                  ref={videoRef}
+                  src={fileUrl}
+                  playsInline
+                  muted
+                  preload="metadata"
+                  onError={(e) => {
+                    const video = e.currentTarget;
+                    const mediaError = video.error;
+                    console.error("Błąd wideo:", {
+                      src: video.currentSrc,
+                      code: mediaError?.code,
+                      message: mediaError?.message,
+                      networkState: video.networkState,
+                      readyState: video.readyState,
+                    });
+                    setStatus(
+                      `Nie udało się wczytać filmu. ${mediaError?.message || `Kod błędu: ${mediaError?.code ?? "nieznany"}`}`
+                    );
+                  }}
+                  onLoadedMetadata={(e) => {
+                    setAspect(e.currentTarget.videoWidth / e.currentTarget.videoHeight || 16 / 9);
+                    setDuration(e.currentTarget.duration || 0);
+                  }}
+                  onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                  onSeeked={() => {
+                    if (!sessionRef.current || !videoRef.current?.paused) return;
+                    void detect();
+                  }}
+                  onPlay={(e) => {
+                    if (modelState !== "ready" || !sessionRef.current) {
+                      e.currentTarget.pause();
+                      return;
+                    }
+                    setPlaying(true);
+                    clearLoop();
+                    lastRunRef.current = 0;
+                    rafRef.current = requestAnimationFrame(tick);
+                  }}
+                  onEnded={() => {
+                    clearLoop();
+                    setPlaying(false);
+                    setStatus("Analiza zakończona");
+                  }}
+                  onPause={() => {
+                    clearLoop();
+                    setPlaying(false);
+                  }}
+                />
+                <canvas ref={canvasRef} aria-label="Klatka wideo z zaznaczonymi detekcjami ognia i dymu" />
+              </>
+            ) : (
+              <div className="fire-empty">
+                <span>▶</span>
+                <b>Podgląd nagrania</b>
+                <small>Wybierz plik wideo, aby zobaczyć detekcje</small>
+              </div>
+            )}
+          </div>
+          {fileUrl && (
+            <div className="fire-player" aria-label="Sterowanie nagraniem">
+              <button
+                className="fire-player-toggle"
+                type="button"
+                onClick={playing ? stop : start}
+                disabled={loading || modelState !== "ready"}
+                aria-label={playing ? "Wstrzymaj analizę" : "Uruchom analizę"}
+              >
+                {playing ? "Ⅱ" : "▶"}
+              </button>
+              <span className="fire-player-time">{formatTime(currentTime)}</span>
+              <input
+                className="fire-seek"
+                type="range"
+                min="0"
+                max={Math.max(duration, 0.01)}
+                step="0.01"
+                value={Math.min(currentTime, duration || 0)}
+                aria-label="Pozycja nagrania"
+                onChange={(e) => {
+                  const time = Number(e.target.value);
+                  if (videoRef.current) videoRef.current.currentTime = time;
+                  setCurrentTime(time);
                 }}
               />
-              <canvas ref={canvasRef} aria-label="Klatka wideo z zaznaczonymi detekcjami ognia i dymu" />
-            </> : <div className="fire-empty"><span>▶</span><b>Podgląd nagrania</b><small>Wybierz plik wideo, aby zobaczyć detekcje</small></div>}
-          </div>
-          {fileUrl && <div className="fire-player" aria-label="Sterowanie nagraniem">
-            <button className="fire-player-toggle" type="button" onClick={playing ? stop : start} disabled={loading || modelState !== "ready"} aria-label={playing ? "Wstrzymaj analizę" : "Uruchom analizę"}>{playing ? "Ⅱ" : "▶"}</button>
-            <span className="fire-player-time">{formatTime(currentTime)}</span>
-            <input className="fire-seek" type="range" min="0" max={Math.max(duration, 0.01)} step="0.01" value={Math.min(currentTime, duration || 0)} aria-label="Pozycja nagrania" onChange={(e) => { const time = Number(e.target.value); if (videoRef.current) videoRef.current.currentTime = time; setCurrentTime(time); }} />
-            <span className="fire-player-time">{formatTime(duration)}</span>
-          </div>}
+              <span className="fire-player-time">{formatTime(duration)}</span>
+            </div>
+          )}
           <div className="fire-controls">
-            <span className="fire-status"><i className={playing ? "live" : ""} />{loading ? "Uruchamianie modelu…" : status}</span>
+            <span className="fire-status">
+              <i className={playing ? "live" : ""} />
+              {loading ? "Uruchamianie modelu…" : status}
+            </span>
           </div>
-          {modelState === "loading" && <p className="fire-model-note" role="status">Przygotowanie modelu może potrwać chwilę. Analizę będzie można uruchomić po zakończeniu.</p>}
-          {modelState === "error" && <div className="fire-model-error"><p>{modelError}</p><button className="btn" type="button" onClick={() => { void ensureSession().catch(() => {}); }}>Ponów przygotowanie modelu</button></div>}
-
+          {modelState === "loading" && (
+            <p className="fire-model-note" role="status">
+              Przygotowanie modelu może potrwać chwilę. Analizę będzie można uruchomić po zakończeniu.
+            </p>
+          )}
+          {modelState === "error" && (
+            <div className="fire-model-error">
+              <p>{modelError}</p>
+              <button
+                className="btn"
+                type="button"
+                onClick={() => {
+                  void ensureSession().catch(() => {});
+                }}
+              >
+                Ponów przygotowanie modelu
+              </button>
+            </div>
+          )}
           <div className="fire-examples">
             <div>
               <h2>Przykładowe nagrania</h2>
@@ -477,60 +568,23 @@ useEffect(() => {
               className="btn"
               type="button"
               onClick={async () => {
-  clearLoop();
-  videoRef.current?.pause();
-
-  setPlaying(false);
-  setCurrentTime(0);
-  setDuration(0);
-  setStats({ count: 0, top: 0, latency: 0 });
-  setStatus("Ładowanie przykładowego nagrania…");
-
-  try {
-    const response = await fetch(DEMO_VIDEO, { cache: "no-store" });
-
-    if (!response.ok) {
-      throw new Error(`Nie udało się pobrać filmu (HTTP ${response.status}).`);
-    }
-
-    const blob = await response.blob();
-    console.log("Status:", response.status);
-console.log("Content-Type:", response.headers.get("content-type"));
-console.log("Rozmiar:", blob.size);
-console.log("Typ Blob:", blob.type);
-console.log(
-  "Pierwsze bajty:",
-  Array.from(new Uint8Array(await blob.slice(0, 16).arrayBuffer()))
-);
-
-    if (!blob.size) {
-      throw new Error("Pobrany plik wideo jest pusty.");
-    }
-
-    const videoBlob = blob.type.startsWith("video/")
-      ? blob
-      : new Blob([blob], { type: "video/mp4" });
-
-    const url = URL.createObjectURL(videoBlob);
-
-    if (fileUrl.startsWith("blob:")) {
-      URL.revokeObjectURL(fileUrl);
-    }
-
-    setFileUrl(url);
-    setFileName("demo_yolo_vid_1.mp4");
-
-    void ensureSession().catch(() => {});
-  } catch (error) {
-    console.error("Błąd ładowania przykładowego wideo:", error);
-
-    setStatus(
-      error instanceof Error
-        ? `Nie udało się załadować przykładowego filmu: ${error.message}`
-        : "Nie udało się załadować przykładowego filmu."
-    );
-  }
-}}
+                clearLoop();
+                videoRef.current?.pause();
+                setPlaying(false);
+                setCurrentTime(0);
+                setDuration(0);
+                setStats({ count: 0, top: 0, latency: 0 });
+                try {
+                  await loadDemoVideo();
+                } catch (error) {
+                  console.error("Błąd ładowania przykładowego wideo:", error);
+                  setStatus(
+                    error instanceof Error
+                      ? `Nie udało się załadować przykładowego filmu: ${error.message}`
+                      : "Nie udało się załadować przykładowego filmu."
+                  );
+                }
+              }}
             >
               ▶ Uruchom przykład
             </button>
@@ -538,11 +592,29 @@ console.log(
         </div>
         <aside className="fire-side">
           <p className="fire-side-label">WYNIK NA ŻYWO</p>
-          <div className="fire-metric"><span>Boxy na klatce wideo</span><b>{stats.count}</b></div>
-          <div className="fire-metric"><span>Najwyższa pewność</span><b>{stats.top ? `${(stats.top * 100).toFixed(1)}%` : "—"}</b></div>
-          <div className="fire-metric"><span>Czas inferencji</span><b>{stats.latency ? `${stats.latency.toFixed(0)} ms` : "—"}</b></div>
-          <div className="fire-legend"><span><i className="fire-dot" /> Ogień</span><span><i className="smoke-dot" /> Dym</span></div>
-          <p className="fire-disclaimer">Demo edukacyjne. Wynik modelu nie zastępuje alarmu przeciwpożarowego ani oceny służb ratunkowych.</p>
+          <div className="fire-metric">
+            <span>Boxy na klatce wideo</span>
+            <b>{stats.count}</b>
+          </div>
+          <div className="fire-metric">
+            <span>Najwyższa pewność</span>
+            <b>{stats.top ? `${(stats.top * 100).toFixed(1)}%` : "—"}</b>
+          </div>
+          <div className="fire-metric">
+            <span>Czas inferencji</span>
+            <b>{stats.latency ? `${stats.latency.toFixed(0)} ms` : "—"}</b>
+          </div>
+          <div className="fire-legend">
+            <span>
+              <i className="fire-dot" /> Ogień
+            </span>
+            <span>
+              <i className="smoke-dot" /> Dym
+            </span>
+          </div>
+          <p className="fire-disclaimer">
+            Demo edukacyjne. Wynik modelu nie zastępuje alarmu przeciwpożarowego ani oceny służb ratunkowych.
+          </p>
         </aside>
       </div>
     </section>
