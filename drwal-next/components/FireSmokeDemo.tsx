@@ -64,23 +64,52 @@ function formatTime(seconds: number) {
   return `${m}:${s}`;
 }
 
+function formatBytes(n: number) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 async function isValidMp4(blob: Blob) {
   if (blob.size < 10_000) return false;
   const h = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
   return h[4] === 0x66 && h[5] === 0x74 && h[6] === 0x79 && h[7] === 0x70;
 }
 
-/** Pobiera cały plik do pamięci i zwraca gotowy blob URL */
-async function loadVideoToMemory(url: string): Promise<{ objectUrl: string; file: File }> {
+/** Pobiera cały plik z progressem → jeden blob URL */
+async function fetchToMemory(
+  url: string,
+  onProgress: (loaded: number, total: number) => void
+): Promise<Blob> {
   const res = await fetch(url, { cache: "force-cache" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const buf = await res.arrayBuffer(); // cały plik w RAM
-  const blob = new Blob([buf], { type: "video/mp4" });
-  if (!(await isValidMp4(blob))) {
-    throw new Error(`Plik demo jest nieprawidłowy (${blob.size} B).`);
+
+  const total = Number(res.headers.get("content-length")) || 0;
+  if (!res.body) {
+    const buf = await res.arrayBuffer();
+    onProgress(buf.byteLength, buf.byteLength);
+    return new Blob([buf], { type: "video/mp4" });
   }
-  const file = new File([blob], "demo_yolo_vid_1.mp4", { type: "video/mp4" });
-  return { objectUrl: URL.createObjectURL(blob), file };
+
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let loaded = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.byteLength;
+    onProgress(loaded, total || loaded);
+  }
+
+  const merged = new Uint8Array(loaded);
+  let offset = 0;
+  for (const c of chunks) {
+    merged.set(c, offset);
+    offset += c.byteLength;
+  }
+  return new Blob([merged], { type: "video/mp4" });
 }
 
 export default function FireSmokeDemo() {
@@ -91,12 +120,12 @@ export default function FireSmokeDemo() {
   const sessionPromiseRef = useRef<Promise<void> | null>(null);
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const inputBufRef = useRef<Float32Array | null>(null);
-  const lastBoxesRef = useRef<Box[]>([]);
   const rafRef = useRef<number | null>(null);
   const busyRef = useRef(false);
   const lastRunRef = useRef(0);
+  const blobUrlRef = useRef<string>(""); // jeden URL – bez spamowania
 
-  const [fileUrl, setFileUrl] = useState("");
+  const [fileUrl, setFileUrl] = useState(""); // puste = nie pokazuj <video>
   const [fileName, setFileName] = useState("");
   const [aspect, setAspect] = useState(16 / 9);
   const [confidence, setConfidence] = useState(0.1);
@@ -107,25 +136,36 @@ export default function FireSmokeDemo() {
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [status, setStatus] = useState("Wybierz nagranie, aby rozpocząć");
+  const [status, setStatus] = useState("Przygotowanie…");
   const [stats, setStats] = useState({ count: 0, top: 0, latency: 0 });
+
+  // progress ładowania wideo
+  const [videoProgress, setVideoProgress] = useState<{ loaded: number; total: number } | null>(null);
+  const [bootPhase, setBootPhase] = useState<"model" | "video" | "ready" | "error">("model");
 
   const clearLoop = useCallback(() => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
   }, []);
 
+  const revokeBlob = useCallback(() => {
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = "";
+    }
+  }, []);
+
   const ensureSession = useCallback(() => {
     if (sessionRef.current && ortRef.current) {
       setModelState("ready");
-      setStatus("Model gotowy. Możesz uruchomić analizę.");
       return Promise.resolve();
     }
     if (sessionPromiseRef.current) return sessionPromiseRef.current;
 
     setModelState("loading");
     setModelError("");
-    setStatus("Przygotowujemy model do analizy. Pierwsze ładowanie może potrwać chwilę.");
+    setBootPhase("model");
+    setStatus("Ładowanie modelu…");
 
     const task = (async () => {
       const res = await fetch("/models/fire-smoke-yolo26s.onnx", { cache: "force-cache" });
@@ -150,7 +190,7 @@ export default function FireSmokeDemo() {
           });
           ortRef.current = ort;
         } catch {
-          /* CPU fallback */
+          /* CPU */
         }
       }
       if (!sessionRef.current) {
@@ -167,12 +207,12 @@ export default function FireSmokeDemo() {
     })()
       .then(() => {
         setModelState("ready");
-        setStatus("Model gotowy. Możesz uruchomić analizę.");
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : "Nie udało się przygotować modelu.";
         setModelState("error");
         setModelError(msg);
+        setBootPhase("error");
         setStatus("Nie udało się przygotować modelu.");
         throw err;
       })
@@ -184,8 +224,9 @@ export default function FireSmokeDemo() {
     return task;
   }, []);
 
+  /** Użytkownik wybiera własny plik – od razu w pamięci */
   const chooseFile = useCallback(
-    (file?: File, existingUrl?: string) => {
+    (file?: File) => {
       if (!file) return;
       if (!file.type.startsWith("video/")) {
         setStatus("Wybierz plik wideo, np. MP4, WebM lub MOV.");
@@ -193,28 +234,69 @@ export default function FireSmokeDemo() {
       }
       clearLoop();
       videoRef.current?.pause();
-      if (fileUrl.startsWith("blob:")) URL.revokeObjectURL(fileUrl);
+      revokeBlob();
 
-      const url = existingUrl ?? URL.createObjectURL(file);
+      const url = URL.createObjectURL(file);
+      blobUrlRef.current = url;
       setFileUrl(url);
       setFileName(file.name);
       setPlaying(false);
       setCurrentTime(0);
       setDuration(0);
       setStats({ count: 0, top: 0, latency: 0 });
-      lastBoxesRef.current = [];
+      setVideoProgress(null);
+      setBootPhase("ready");
+      setStatus("Nagranie gotowe.");
       void ensureSession().catch(() => {});
     },
-    [clearLoop, ensureSession, fileUrl]
+    [clearLoop, ensureSession, revokeBlob]
   );
 
-  /** Demo: cały plik → RAM → dopiero potem odtwarzanie */
-  const loadDemoVideo = useCallback(async () => {
-    setStatus("Wczytywanie nagrania do pamięci…");
-    const { objectUrl, file } = await loadVideoToMemory(DEMO_VIDEO);
-    chooseFile(file, objectUrl);
-    setStatus("Nagranie gotowe w pamięci.");
-  }, [chooseFile]);
+  /** Demo: model → wideo do RAM (z progressem) → dopiero wtedy <video> */
+  const bootDemo = useCallback(async () => {
+    try {
+      // 1) Model
+      setBootPhase("model");
+      setStatus("Ładowanie modelu…");
+      setVideoProgress(null);
+      setFileUrl(""); // ukryj player
+      await ensureSession();
+
+      // 2) Wideo w całości do pamięci
+      setBootPhase("video");
+      setStatus("Pobieranie nagrania…");
+      const blob = await fetchToMemory(DEMO_VIDEO, (loaded, total) => {
+        setVideoProgress({ loaded, total });
+        if (total > 0) {
+          const pct = Math.min(100, Math.round((loaded / total) * 100));
+          setStatus(`Pobieranie nagrania… ${pct}%`);
+        } else {
+          setStatus(`Pobieranie nagrania… ${formatBytes(loaded)}`);
+        }
+      });
+
+      if (!(await isValidMp4(blob))) {
+        throw new Error(`Plik demo jest nieprawidłowy (${blob.size} B).`);
+      }
+
+      revokeBlob();
+      const url = URL.createObjectURL(blob);
+      blobUrlRef.current = url;
+
+      setFileUrl(url);
+      setFileName("demo_yolo_vid_1.mp4");
+      setVideoProgress(null);
+      setBootPhase("ready");
+      setStatus("Gotowe. Uruchamianie…");
+      setPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+      setStats({ count: 0, top: 0, latency: 0 });
+    } catch (err) {
+      setBootPhase("error");
+      setStatus(err instanceof Error ? err.message : "Błąd ładowania demo.");
+    }
+  }, [ensureSession, revokeBlob]);
 
   const drawBoxes = (ctx: CanvasRenderingContext2D, boxes: Box[], w: number, h: number) => {
     ctx.clearRect(0, 0, w, h);
@@ -311,14 +393,8 @@ export default function FireSmokeDemo() {
         confidenceRef.current
       );
 
-      lastBoxesRef.current = boxes;
       drawBoxes(ctx, boxes, w, h);
-
-      setStats({
-        count: boxes.length,
-        top: boxes[0]?.score ?? 0,
-        latency: performance.now() - t0,
-      });
+      setStats({ count: boxes.length, top: boxes[0]?.score ?? 0, latency: performance.now() - t0 });
       setStatus(boxes.length ? "Detekcja aktywna" : "Analiza trwa · nie wykryto obiektów w tej klatce");
     } catch (err) {
       clearLoop();
@@ -350,31 +426,7 @@ export default function FireSmokeDemo() {
     const video = videoRef.current;
     if (!video || !fileUrl || modelState !== "ready" || !sessionRef.current) return;
     setLoading(true);
-    setStatus("Start…");
     try {
-      // upewnij się, że wideo jest w pełni w buforze
-      if (video.readyState < 3) {
-        await new Promise<void>((resolve, reject) => {
-          const ok = () => {
-            cleanup();
-            resolve();
-          };
-          const bad = () => {
-            cleanup();
-            reject(new Error("Wideo nie jest gotowe."));
-          };
-          const cleanup = () => {
-            video.removeEventListener("canplaythrough", ok);
-            video.removeEventListener("error", bad);
-          };
-          video.addEventListener("canplaythrough", ok, { once: true });
-          video.addEventListener("error", bad, { once: true });
-          if (video.readyState >= 3) {
-            cleanup();
-            resolve();
-          }
-        });
-      }
       await video.play();
       setPlaying(true);
       clearLoop();
@@ -398,33 +450,22 @@ export default function FireSmokeDemo() {
     setStatus("Analiza wstrzymana");
   };
 
-  // Auto-load demo (cały plik do RAM)
+  // Boot: model → wideo → player
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        await loadDemoVideo();
-      } catch (err) {
-        if (!cancelled) {
-          setStatus(
-            err instanceof Error
-              ? `Nie udało się wczytać demo: ${err.message}`
-              : "Nie udało się wczytać przykładowego nagrania."
-          );
-        }
-      }
-    })();
+    void bootDemo();
     return () => {
-      cancelled = true;
+      clearLoop();
+      revokeBlob();
     };
-  }, [loadDemoVideo]);
+  }, [bootDemo, clearLoop, revokeBlob]);
 
-  // Autoplay po załadowaniu demo + modelu
+  // Autoplay dopiero gdy fileUrl + model ready + video can play
   useEffect(() => {
-    if (fileName !== "demo_yolo_vid_1.mp4" || !fileUrl || modelState !== "ready") return;
+    if (!fileUrl || modelState !== "ready" || fileName !== "demo_yolo_vid_1.mp4") return;
     const video = videoRef.current;
     if (!video) return;
     let cancelled = false;
+
     (async () => {
       try {
         if (video.readyState < 3) {
@@ -435,7 +476,7 @@ export default function FireSmokeDemo() {
             };
             const bad = () => {
               cleanup();
-              reject();
+              reject(new Error("Wideo nie gotowe"));
             };
             const cleanup = () => {
               video.removeEventListener("canplaythrough", ok);
@@ -443,6 +484,7 @@ export default function FireSmokeDemo() {
             };
             video.addEventListener("canplaythrough", ok, { once: true });
             video.addEventListener("error", bad, { once: true });
+            video.load();
             if (video.readyState >= 3) {
               cleanup();
               resolve();
@@ -452,14 +494,23 @@ export default function FireSmokeDemo() {
         if (cancelled) return;
         video.muted = true;
         await video.play();
+        setStatus("Detekcja aktywna");
       } catch {
-        if (!cancelled) setStatus("Film wczytany. Kliknij ▶, aby rozpocząć analizę.");
+        if (!cancelled) setStatus("Film gotowy. Kliknij ▶, aby rozpocząć.");
       }
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [fileName, fileUrl, modelState]);
+  }, [fileUrl, fileName, modelState]);
+
+  const progressPct =
+    videoProgress && videoProgress.total > 0
+      ? Math.min(100, Math.round((videoProgress.loaded / videoProgress.total) * 100))
+      : null;
+
+  const showPlayer = !!fileUrl && bootPhase === "ready";
 
   return (
     <section className="fire-demo wrap" aria-labelledby="fire-title">
@@ -518,7 +569,7 @@ export default function FireSmokeDemo() {
           </div>
 
           <div className="fire-stage" style={{ aspectRatio: aspect }}>
-            {fileUrl ? (
+            {showPlayer ? (
               <>
                 <video
                   key={fileUrl}
@@ -562,15 +613,63 @@ export default function FireSmokeDemo() {
                 <canvas ref={canvasRef} aria-label="Klatka wideo z zaznaczonymi detekcjami ognia i dymu" />
               </>
             ) : (
-              <div className="fire-empty">
-                <span>▶</span>
-                <b>Podgląd nagrania</b>
-                <small>Wybierz plik wideo, aby zobaczyć detekcje</small>
+              <div className="fire-empty" style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "center" }}>
+                {bootPhase === "model" && (
+                  <>
+                    <span>⏳</span>
+                    <b>Ładowanie modelu…</b>
+                    <small>Chwilę, proszę czekać</small>
+                  </>
+                )}
+                {bootPhase === "video" && (
+                  <>
+                    <span>⬇</span>
+                    <b>Pobieranie nagrania…</b>
+                    {progressPct !== null ? (
+                      <small>
+                        {progressPct}% · {formatBytes(videoProgress!.loaded)}
+                        {videoProgress!.total > 0 ? ` / ${formatBytes(videoProgress!.total)}` : ""}
+                      </small>
+                    ) : videoProgress ? (
+                      <small>{formatBytes(videoProgress.loaded)}</small>
+                    ) : (
+                      <small>Start pobierania…</small>
+                    )}
+                    {progressPct !== null && (
+                      <div
+                        style={{
+                          width: "min(200px, 60%)",
+                          height: 4,
+                          borderRadius: 2,
+                          background: "rgba(255,255,255,0.15)",
+                          overflow: "hidden",
+                          marginTop: 4,
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: `${progressPct}%`,
+                            height: "100%",
+                            background: "#61d7ff",
+                            transition: "width 0.15s linear",
+                          }}
+                        />
+                      </div>
+                    )}
+                  </>
+                )}
+                {bootPhase === "error" && (
+                  <>
+                    <span>⚠</span>
+                    <b>Błąd ładowania</b>
+                    <small>{status}</small>
+                  </>
+                )}
               </div>
             )}
           </div>
 
-          {fileUrl && (
+          {showPlayer && (
             <div className="fire-player" aria-label="Sterowanie nagraniem">
               <button
                 className="fire-player-toggle"
@@ -607,16 +706,11 @@ export default function FireSmokeDemo() {
             </span>
           </div>
 
-          {modelState === "loading" && (
-            <p className="fire-model-note" role="status">
-              Przygotowanie modelu może potrwać chwilę. Analizę będzie można uruchomić po zakończeniu.
-            </p>
-          )}
           {modelState === "error" && (
             <div className="fire-model-error">
               <p>{modelError}</p>
-              <button className="btn" type="button" onClick={() => void ensureSession().catch(() => {})}>
-                Ponów przygotowanie modelu
+              <button className="btn" type="button" onClick={() => void bootDemo()}>
+                Spróbuj ponownie
               </button>
             </div>
           )}
@@ -629,23 +723,12 @@ export default function FireSmokeDemo() {
             <button
               className="btn"
               type="button"
-              onClick={async () => {
+              disabled={bootPhase === "model" || bootPhase === "video"}
+              onClick={() => {
                 clearLoop();
                 videoRef.current?.pause();
                 setPlaying(false);
-                setCurrentTime(0);
-                setDuration(0);
-                setStats({ count: 0, top: 0, latency: 0 });
-                lastBoxesRef.current = [];
-                try {
-                  await loadDemoVideo();
-                } catch (err) {
-                  setStatus(
-                    err instanceof Error
-                      ? `Nie udało się załadować: ${err.message}`
-                      : "Nie udało się załadować przykładowego filmu."
-                  );
-                }
+                void bootDemo();
               }}
             >
               ▶ Uruchom przykład
