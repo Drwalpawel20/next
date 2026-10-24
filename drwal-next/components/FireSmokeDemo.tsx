@@ -17,8 +17,8 @@ const SIZE = 640;
 const IOU_THRESHOLD = 0.45;
 const CLASSES = ["Smoke", "Fire"];
 
-// Plik umieszczony w public/videos/
-const DEMO_VIDEO = "/videos/demo_yolo_vid_1.mp4";
+
+const DEMO_VIDEO_CANDIDATES = "/demo_yolo_vid_1.mp4";
 
 function iou(a: Box, b: Box) {
   const x1 = Math.max(a.x, b.x);
@@ -65,17 +65,14 @@ function decode(
       0,
       Math.min(width, (cx - bw / 2 - padX) / scale)
     );
-
     const y = Math.max(
       0,
       Math.min(height, (cy - bh / 2 - padY) / scale)
     );
-
     const x2 = Math.max(
       0,
       Math.min(width, (cx + bw / 2 - padX) / scale)
     );
-
     const y2 = Math.max(
       0,
       Math.min(height, (cy + bh / 2 - padY) / scale)
@@ -132,8 +129,8 @@ export default function FireSmokeDemo() {
   const sessionRef = useRef<InferenceSession | null>(null);
 
   const ortRef = useRef<
-    | (typeof import("onnxruntime-web") |
-        typeof import("onnxruntime-web/webgpu"))
+    | typeof import("onnxruntime-web")
+    | typeof import("onnxruntime-web/webgpu")
     | null
   >(null);
 
@@ -151,6 +148,7 @@ export default function FireSmokeDemo() {
   const confidenceRef = useRef(0.1);
 
   const [loading, setLoading] = useState(false);
+  const [demoLoading, setDemoLoading] = useState(false);
 
   const [modelState, setModelState] = useState<
     "idle" | "loading" | "ready" | "error"
@@ -179,7 +177,7 @@ export default function FireSmokeDemo() {
     rafRef.current = null;
   }, []);
 
-  const ensureSession = useCallback(() => {
+  const ensureSession = useCallback((): Promise<void> => {
     if (sessionRef.current && ortRef.current) {
       setModelState("ready");
       setStatus("Model gotowy. Możesz uruchomić analizę.");
@@ -192,7 +190,6 @@ export default function FireSmokeDemo() {
 
     setModelState("loading");
     setModelError("");
-
     setStatus(
       "Przygotowujemy model do analizy. Pierwsze ładowanie może potrwać chwilę."
     );
@@ -235,6 +232,7 @@ export default function FireSmokeDemo() {
         );
       }
 
+      // Najpierw próbujemy użyć GPU.
       if ("gpu" in navigator) {
         try {
           const ort = await import("onnxruntime-web/webgpu");
@@ -255,6 +253,7 @@ export default function FireSmokeDemo() {
         }
       }
 
+      // Jeśli GPU nie zadziałało, używamy WASM/CPU.
       if (!sessionRef.current) {
         const ort = await import("onnxruntime-web");
 
@@ -286,7 +285,9 @@ export default function FireSmokeDemo() {
     })()
       .then(() => {
         setModelState("ready");
-        setStatus("Model gotowy. Możesz uruchomić analizę.");
+        setStatus(
+          "Model gotowy. Możesz uruchomić analizę."
+        );
       })
       .catch((error: unknown) => {
         const message =
@@ -305,7 +306,6 @@ export default function FireSmokeDemo() {
       });
 
     sessionPromiseRef.current = task;
-
     return task;
   }, []);
 
@@ -334,58 +334,103 @@ export default function FireSmokeDemo() {
       setPlaying(false);
       setCurrentTime(0);
       setDuration(0);
-      setStats({ count: 0, top: 0, latency: 0 });
+
+      setStats({
+        count: 0,
+        top: 0,
+        latency: 0,
+      });
 
       void ensureSession().catch(() => {});
     },
     [clearLoop, ensureSession, fileUrl]
   );
 
-  // Wczytuje film z public/videos bez tworzenia blob URL.
+  // Wczytuje przykładowy film z public/videos.
   const chooseDemo = useCallback(async () => {
+    if (demoLoading) return;
+
+    setDemoLoading(true);
+    setStatus("Sprawdzamy dostępność filmu demonstracyjnego…");
+
     clearLoop();
     videoRef.current?.pause();
 
-    if (fileUrl.startsWith("blob:")) {
-      URL.revokeObjectURL(fileUrl);
-    }
-
-    setFileUrl("");
-    setFileName("yolo_demo_1.mp4");
-    setPlaying(false);
-    setCurrentTime(0);
-    setDuration(0);
-    setStats({ count: 0, top: 0, latency: 0 });
-    setLoading(true);
-    setStatus("Sprawdzanie przykładowego nagrania…");
-
     try {
-      const response = await fetch(DEMO_VIDEO, {
-        method: "HEAD",
-        cache: "no-store",
-      });
+      let foundUrl: string | null = null;
 
-      if (!response.ok) {
+      for (const candidate of DEMO_VIDEO_CANDIDATES) {
+        try {
+          const response = await fetch(candidate, {
+            method: "HEAD",
+            cache: "no-store",
+          });
+
+          if (
+            response.ok &&
+            response.headers.get("content-type")?.startsWith("video/")
+          ) {
+            foundUrl = candidate;
+            break;
+          }
+
+          // Niektóre serwery nie zwracają typu MIME.
+          if (response.ok) {
+            foundUrl = candidate;
+            break;
+          }
+        } catch {
+          // Sprawdzamy kolejną możliwą nazwę pliku.
+        }
+      }
+
+      if (!foundUrl) {
         throw new Error(
-          `Nie znaleziono przykładowego filmu (HTTP ${response.status}). Sprawdź ścieżkę ${DEMO_VIDEO}.`
+          "Nie znaleziono filmu demonstracyjnego. Sprawdź, czy plik istnieje w public/videos/ i czy jego nazwa oraz rozszerzenie są poprawne."
         );
       }
 
-      setFileUrl(DEMO_VIDEO);
-      setStatus("Przykładowe nagranie zostało wczytane.");
+      if (fileUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(fileUrl);
+      }
 
+      setFileUrl(foundUrl);
+      setFileName(
+        foundUrl.split("/").pop() || "yolo_demo_1"
+      );
+
+      setPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+
+      setStats({
+        count: 0,
+        top: 0,
+        latency: 0,
+      });
+
+      setStatus(
+        "Film wczytany. Przygotowujemy model do analizy…"
+      );
+
+      // Komunikat o ładowaniu modelu pojawi się natychmiast.
       void ensureSession().catch(() => {});
     } catch (error) {
-      setFileName("");
-      setStatus(
+      const message =
         error instanceof Error
           ? error.message
-          : "Nie udało się wczytać przykładowego filmu."
-      );
+          : "Nie udało się wczytać filmu demonstracyjnego.";
+
+      setStatus(message);
     } finally {
-      setLoading(false);
+      setDemoLoading(false);
     }
-  }, [clearLoop, ensureSession, fileUrl]);
+  }, [
+    clearLoop,
+    demoLoading,
+    ensureSession,
+    fileUrl,
+  ]);
 
   const detect = useCallback(async () => {
     const video = videoRef.current;
@@ -435,11 +480,11 @@ export default function FireSmokeDemo() {
       }
 
       if (!frameCanvasRef.current) {
-        frameCanvasRef.current = document.createElement("canvas");
+        frameCanvasRef.current =
+          document.createElement("canvas");
       }
 
       const frame = frameCanvasRef.current;
-
       frame.width = SIZE;
       frame.height = SIZE;
 
@@ -454,7 +499,6 @@ export default function FireSmokeDemo() {
       }
 
       const scale = Math.min(SIZE / w, SIZE / h);
-
       const drawW = Math.round(w * scale);
       const drawH = Math.round(h * scale);
 
@@ -463,7 +507,6 @@ export default function FireSmokeDemo() {
 
       fctx.fillStyle = "rgb(114, 114, 114)";
       fctx.fillRect(0, 0, SIZE, SIZE);
-
       fctx.drawImage(video, padX, padY, drawW, drawH);
 
       const rgba = fctx.getImageData(
@@ -479,8 +522,10 @@ export default function FireSmokeDemo() {
 
       for (let i = 0; i < SIZE * SIZE; i++) {
         input[i] = rgba[i * 4] / 255;
-        input[SIZE * SIZE + i] = rgba[i * 4 + 1] / 255;
-        input[2 * SIZE * SIZE + i] = rgba[i * 4 + 2] / 255;
+        input[SIZE * SIZE + i] =
+          rgba[i * 4 + 1] / 255;
+        input[2 * SIZE * SIZE + i] =
+          rgba[i * 4 + 2] / 255;
       }
 
       const tensor = new ort.Tensor(
@@ -492,7 +537,9 @@ export default function FireSmokeDemo() {
       const session = sessionRef.current;
 
       if (!session) {
-        throw new Error("Sesja modelu nie jest gotowa.");
+        throw new Error(
+          "Sesja modelu nie jest gotowa."
+        );
       }
 
       const result = await session.run({
@@ -516,13 +563,17 @@ export default function FireSmokeDemo() {
       const ratio = Math.max(1, w / 960);
 
       ctx.lineWidth = 3 * ratio;
-      ctx.font = `600 ${Math.round(16 * ratio)}px system-ui, sans-serif`;
+      ctx.font = `600 ${Math.round(
+        16 * ratio
+      )}px system-ui, sans-serif`;
 
       for (const box of boxes) {
         const color =
           box.cls === 1 ? "#ff634f" : "#61d7ff";
 
-        const label = `${CLASSES[box.cls]} ${(box.score * 100).toFixed(0)}%`;
+        const label = `${CLASSES[box.cls]} ${(
+          box.score * 100
+        ).toFixed(0)}%`;
 
         ctx.strokeStyle = color;
         ctx.fillStyle = color;
@@ -536,9 +587,11 @@ export default function FireSmokeDemo() {
 
         const labelW =
           ctx.measureText(label).width + 16;
-
         const labelH = 27 * ratio;
-        const labelY = Math.max(0, box.y - labelH);
+        const labelY = Math.max(
+          0,
+          box.y - labelH
+        );
 
         ctx.fillRect(
           box.x,
@@ -548,7 +601,6 @@ export default function FireSmokeDemo() {
         );
 
         ctx.fillStyle = "#08101b";
-
         ctx.fillText(
           label,
           box.x + 8 * ratio,
@@ -607,17 +659,28 @@ export default function FireSmokeDemo() {
   const start = async () => {
     const video = videoRef.current;
 
+    if (!video || !fileUrl) return;
+
+    // Nie rozpoczynamy analizy przed załadowaniem modelu.
     if (
-      !video ||
-      !fileUrl ||
       modelState !== "ready" ||
       !sessionRef.current
     ) {
-      return;
+      setStatus(
+        "Model jest jeszcze przygotowywany. Poczekaj na zakończenie ładowania."
+      );
+
+      try {
+        await ensureSession();
+      } catch {
+        return;
+      }
+
+      if (!sessionRef.current) return;
     }
 
     setLoading(true);
-    setStatus("Przygotowanie modelu i nagrania…");
+    setStatus("Uruchamianie analizy nagrania…");
 
     try {
       await video.play();
@@ -646,13 +709,16 @@ export default function FireSmokeDemo() {
   useEffect(() => {
     return () => {
       clearLoop();
+    };
+  }, [clearLoop]);
 
-      // Revoke tylko adresy utworzone przez URL.createObjectURL().
+  useEffect(() => {
+    return () => {
       if (fileUrl.startsWith("blob:")) {
         URL.revokeObjectURL(fileUrl);
       }
     };
-  }, [clearLoop, fileUrl]);
+  }, [fileUrl]);
 
   return (
     <section
@@ -673,9 +739,9 @@ export default function FireSmokeDemo() {
         </h1>
 
         <p>
-          Wybierz własne nagranie lub uruchom przykładowy film.
-          Model wykrywa ogień i dym bezpośrednio w przeglądarce,
-          a wybrany plik pozostaje na Twoim urządzeniu.
+          Wybierz własne nagranie. Model wykrywa ogień i
+          dym bezpośrednio w przeglądarce, a plik pozostaje
+          na Twoim urządzeniu.
         </p>
       </div>
 
@@ -711,6 +777,27 @@ export default function FireSmokeDemo() {
             <span className="btn">Przeglądaj pliki</span>
           </label>
 
+          <div className="fire-examples">
+            <div>
+              <h2>Przykładowe nagranie</h2>
+              <p>
+                Uruchom przygotowany klip i zobacz detekcję
+                ognia oraz dymu.
+              </p>
+            </div>
+
+            <button
+              className="btn"
+              type="button"
+              onClick={() => void chooseDemo()}
+              disabled={demoLoading}
+            >
+              {demoLoading
+                ? "Sprawdzanie filmu…"
+                : "▶ Uruchom przykład"}
+            </button>
+          </div>
+
           <div className="fire-confidence">
             <label htmlFor="fire-confidence">
               Pewność detekcji{" "}
@@ -725,13 +812,17 @@ export default function FireSmokeDemo() {
               step="5"
               value={Math.round(confidence * 100)}
               onChange={(e) => {
-                const value = Number(e.target.value) / 100;
+                const value =
+                  Number(e.target.value) / 100;
+
                 confidenceRef.current = value;
                 setConfidence(value);
               }}
             />
 
-            <small>Minimalna pewność wykrycia obiektu</small>
+            <small>
+              Minimalna pewność wykrycia obiektu
+            </small>
           </div>
 
           <div
@@ -745,28 +836,22 @@ export default function FireSmokeDemo() {
                   src={fileUrl}
                   playsInline
                   preload="metadata"
+                  onError={() => {
+                    clearLoop();
+                    setPlaying(false);
+                    setStatus(
+                      "Nie udało się wczytać filmu. Sprawdź, czy plik istnieje w public/videos/ i czy jego nazwa jest poprawna."
+                    );
+                  }}
                   onLoadedMetadata={(e) => {
                     const video = e.currentTarget;
 
                     setAspect(
-                      video.videoWidth / video.videoHeight ||
-                        16 / 9
+                      video.videoWidth /
+                        video.videoHeight || 16 / 9
                     );
 
                     setDuration(video.duration || 0);
-
-                    // Wyzeruj canvas dla nowego nagrania.
-                    const canvas = canvasRef.current;
-
-                    if (canvas) {
-                      const ctx = canvas.getContext("2d");
-                      ctx?.clearRect(
-                        0,
-                        0,
-                        canvas.width,
-                        canvas.height
-                      );
-                    }
                   }}
                   onTimeUpdate={(e) =>
                     setCurrentTime(
@@ -789,6 +874,11 @@ export default function FireSmokeDemo() {
                       !sessionRef.current
                     ) {
                       e.currentTarget.pause();
+
+                      setStatus(
+                        "Poczekaj, aż model zostanie załadowany."
+                      );
+
                       return;
                     }
 
@@ -808,11 +898,6 @@ export default function FireSmokeDemo() {
                     clearLoop();
                     setPlaying(false);
                   }}
-                  onError={() => {
-                    setStatus(
-                      "Nie udało się odtworzyć filmu. Sprawdź format pliku."
-                    );
-                  }}
                 />
 
                 <canvas
@@ -825,7 +910,7 @@ export default function FireSmokeDemo() {
                 <span>▶</span>
                 <b>Podgląd nagrania</b>
                 <small>
-                  Wybierz plik lub załaduj przykładowe nagranie
+                  Wybierz plik lub uruchom przykład
                 </small>
               </div>
             )}
@@ -839,11 +924,10 @@ export default function FireSmokeDemo() {
               <button
                 className="fire-player-toggle"
                 type="button"
-                onClick={playing ? stop : start}
-                disabled={
-                  loading ||
-                  modelState !== "ready"
+                onClick={() =>
+                  playing ? stop() : void start()
                 }
+                disabled={loading}
                 aria-label={
                   playing
                     ? "Wstrzymaj analizę"
@@ -889,52 +973,60 @@ export default function FireSmokeDemo() {
             <span className="fire-status">
               <i className={playing ? "live" : ""} />
               {loading
-                ? "Uruchamianie modelu…"
+                ? "Uruchamianie analizy…"
                 : status}
             </span>
           </div>
 
-          {modelState === "loading" && (
+          {modelState === "idle" && (
             <p className="fire-model-note" role="status">
-              Przygotowanie modelu może potrwać chwilę.
-              Analizę będzie można uruchomić po zakończeniu.
+              Model nie został jeszcze załadowany. Po
+              wybraniu nagrania lub uruchomieniu przykładu
+              przygotowanie modelu może potrwać chwilę.
+            </p>
+          )}
+
+          {modelState === "loading" && (
+            <p
+              className="fire-model-note"
+              role="status"
+              aria-live="polite"
+            >
+              <strong>Ładowanie modelu AI…</strong>
+              <br />
+              Pobieranie i przygotowanie modelu może potrwać
+              kilka sekund, szczególnie przy pierwszym
+              uruchomieniu. Poczekaj, aż proces się zakończy.
+              Analiza będzie dostępna po załadowaniu modelu.
+            </p>
+          )}
+
+          {modelState === "ready" && (
+            <p className="fire-model-note" role="status">
+              Model jest gotowy. Możesz uruchomić analizę
+              nagrania.
             </p>
           )}
 
           {modelState === "error" && (
             <div className="fire-model-error">
-              <p>{modelError}</p>
+              <p>
+                Nie udało się przygotować modelu:{" "}
+                {modelError}
+              </p>
 
               <button
                 className="btn"
                 type="button"
-                onClick={() => {
-                  void ensureSession().catch(() => {});
-                }}
+                onClick={() =>
+                  void ensureSession().catch(() => {})
+                }
               >
                 Ponów przygotowanie modelu
               </button>
             </div>
           )}
 
-          <div className="fire-examples">
-            <div>
-              <h2>Przykładowe nagranie</h2>
-              <p>
-                Uruchom demonstrację detekcji ognia i dymu
-                na przygotowanym filmie.
-              </p>
-            </div>
-
-            <button
-              className="btn"
-              type="button"
-              onClick={() => void chooseDemo()}
-              disabled={loading}
-            >
-              ▶ Uruchom przykład
-            </button>
-          </div>
         </div>
 
         <aside className="fire-side">
@@ -976,7 +1068,8 @@ export default function FireSmokeDemo() {
 
           <p className="fire-disclaimer">
             Demo edukacyjne. Wynik modelu nie zastępuje
-            alarmu przeciwpożarowego ani oceny służb ratunkowych.
+            alarmu przeciwpożarowego ani oceny służb
+            ratunkowych.
           </p>
         </aside>
       </div>
