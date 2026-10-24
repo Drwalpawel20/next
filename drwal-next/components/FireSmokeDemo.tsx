@@ -373,21 +373,52 @@ export default function FireSmokeDemo() {
               className="btn"
               type="button"
               onClick={async () => {
-                clearLoop();
-                videoRef.current?.pause();
+  clearLoop();
+  videoRef.current?.pause();
 
-                if (fileUrl.startsWith("blob:")) URL.revokeObjectURL(fileUrl);
+  setPlaying(false);
+  setCurrentTime(0);
+  setDuration(0);
+  setStats({ count: 0, top: 0, latency: 0 });
+  setStatus("Ładowanie przykładowego nagrania…");
 
-                setFileUrl(DEMO_VIDEO);
-                setFileName("demo_yolo_vid_1.mp4");
-                setPlaying(false);
-                setCurrentTime(0);
-                setDuration(0);
-                setStats({ count: 0, top: 0, latency: 0 });
-                setStatus("Ładowanie przykładowego nagrania…");
+  try {
+    const response = await fetch(DEMO_VIDEO, { cache: "no-store" });
 
-                void ensureSession().catch(() => {});
-              }}
+    if (!response.ok) {
+      throw new Error(`Nie udało się pobrać filmu (HTTP ${response.status}).`);
+    }
+
+    const blob = await response.blob();
+
+    if (!blob.size) {
+      throw new Error("Pobrany plik wideo jest pusty.");
+    }
+
+    const videoBlob = blob.type.startsWith("video/")
+      ? blob
+      : new Blob([blob], { type: "video/mp4" });
+
+    const url = URL.createObjectURL(videoBlob);
+
+    if (fileUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(fileUrl);
+    }
+
+    setFileUrl(url);
+    setFileName("demo_yolo_vid_1.mp4");
+
+    void ensureSession().catch(() => {});
+  } catch (error) {
+    console.error("Błąd ładowania przykładowego wideo:", error);
+
+    setStatus(
+      error instanceof Error
+        ? `Nie udało się załadować przykładowego filmu: ${error.message}`
+        : "Nie udało się załadować przykładowego filmu."
+    );
+  }
+}}
             >
               ▶ Uruchom przykład
             </button>
