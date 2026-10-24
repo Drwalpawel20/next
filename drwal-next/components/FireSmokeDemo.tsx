@@ -390,6 +390,14 @@ export default function FireSmokeDemo() {
     }
 
     const blob = await response.blob();
+    console.log("Status:", response.status);
+console.log("Content-Type:", response.headers.get("content-type"));
+console.log("Rozmiar:", blob.size);
+console.log("Typ Blob:", blob.type);
+console.log(
+  "Pierwsze bajty:",
+  Array.from(new Uint8Array(await blob.slice(0, 16).arrayBuffer()))
+);
 
     if (!blob.size) {
       throw new Error("Pobrany plik wideo jest pusty.");
