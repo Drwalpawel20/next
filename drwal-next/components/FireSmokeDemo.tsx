@@ -7,6 +7,7 @@ const SIZE = 640;
 
 const IOU_THRESHOLD = 0.45;
 const CLASSES = ["Smoke", "Fire"];
+const DEMO_VIDEO = "/videos/demo_yolo_vid_1.mp4";
 
 function iou(a: Box, b: Box) {
   const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
@@ -57,7 +58,6 @@ export default function FireSmokeDemo() {
   const lastRunRef = useRef(0);
   const [fileUrl, setFileUrl] = useState("");
   const [fileName, setFileName] = useState("");
-  const DEMO_VIDEO = "/videos/demo_yolo_vid_1.mp4";
   const [aspect, setAspect] = useState(16 / 9);
   const [confidence, setConfidence] = useState(0.1);
   const confidenceRef = useRef(0.1);
@@ -275,10 +275,113 @@ export default function FireSmokeDemo() {
     setStatus("Analiza wstrzymana");
   };
 
-  useEffect(() => () => {
-    clearLoop();
-    if (fileUrl.startsWith("blob:")) URL.revokeObjectURL(fileUrl);
-  }, [clearLoop, fileUrl]);
+  useEffect(() => {
+  let cancelled = false;
+
+  const loadDemo = async () => {
+    try {
+      setStatus("Wczytywanie przykładowego nagrania…");
+
+      const response = await fetch(DEMO_VIDEO, { cache: "no-store" });
+
+      if (!response.ok) {
+        throw new Error(`Nie udało się pobrać filmu: HTTP ${response.status}`);
+      }
+
+      const blob = await response.blob();
+
+      if (blob.size < 1000) {
+        throw new Error(`Plik demo jest nieprawidłowy: ${blob.size} B.`);
+      }
+
+      if (cancelled) return;
+
+      const file = new File([blob], "demo_yolo_vid_1.mp4", {
+        type: "video/mp4",
+      });
+
+      chooseFile(file);
+    } catch (error) {
+      if (cancelled) return;
+
+      console.error("Błąd wczytywania demo:", error);
+      setStatus(
+        error instanceof Error
+          ? `Nie udało się wczytać demo: ${error.message}`
+          : "Nie udało się wczytać przykładowego nagrania."
+      );
+    }
+  };
+
+  void loadDemo();
+
+  return () => {
+    cancelled = true;
+  };
+}, [chooseFile]);
+
+useEffect(() => {
+  if (
+    fileName !== "demo_yolo_vid_1.mp4" ||
+    !fileUrl ||
+    modelState !== "ready"
+  ) {
+    return;
+  }
+
+  const video = videoRef.current;
+  if (!video) return;
+
+  let cancelled = false;
+
+  const autoplay = async () => {
+    try {
+      if (video.readyState < 2) {
+        await new Promise<void>((resolve, reject) => {
+          const onReady = () => {
+            cleanup();
+            resolve();
+          };
+
+          const onError = () => {
+            cleanup();
+            reject(new Error("Nie udało się odczytać filmu demo."));
+          };
+
+          const cleanup = () => {
+            video.removeEventListener("loadeddata", onReady);
+            video.removeEventListener("error", onError);
+          };
+
+          video.addEventListener("loadeddata", onReady, { once: true });
+          video.addEventListener("error", onError, { once: true });
+
+          if (video.readyState >= 2) {
+            cleanup();
+            resolve();
+          }
+        });
+      }
+
+      if (cancelled) return;
+
+      video.muted = true;
+      await video.play();
+      // Istniejący onPlay uruchomi pętlę detekcji.
+    } catch (error) {
+      if (cancelled) return;
+
+      console.error("Automatyczne uruchomienie demo nie powiodło się:", error);
+      setStatus("Film wczytany. Kliknij ▶, aby rozpocząć analizę.");
+    }
+  };
+
+  void autoplay();
+
+  return () => {
+    cancelled = true;
+  };
+}, [fileName, fileUrl, modelState]);
 
   return (
     <section className="fire-demo wrap" aria-labelledby="fire-title">
@@ -307,6 +410,7 @@ export default function FireSmokeDemo() {
                 ref={videoRef}
                 src={fileUrl}
                 playsInline
+                muted
                 preload="metadata"
                 onError={(e) => {
                   const video = e.currentTarget;
