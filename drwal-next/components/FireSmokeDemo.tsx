@@ -9,21 +9,41 @@ const IOU_THRESHOLD = 0.45;
 const CLASSES = ["Smoke", "Fire"];
 const DEMO_VIDEO = "/videos/demo_yolo_vid_1.mp4";
 
+// Bazowy interwał między inferencjami (ms). Będzie się adaptował.
+const BASE_INTERVAL = 280;
+const MIN_INTERVAL = 180;
+const MAX_INTERVAL = 600;
+
 function iou(a: Box, b: Box) {
-  const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
-  const x2 = Math.min(a.x + a.w, b.x + b.w), y2 = Math.min(a.y + a.h, b.y + b.h);
+  const x1 = Math.max(a.x, b.x),
+    y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.w, b.x + b.w),
+    y2 = Math.min(a.y + a.h, b.y + b.h);
   const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
   return intersection / (a.w * a.h + b.w * b.h - intersection + 1e-6);
 }
 
-function decode(data: Float32Array, width: number, height: number, scale: number, padX: number, padY: number, threshold: number): Box[] {
+function decode(
+  data: Float32Array,
+  width: number,
+  height: number,
+  scale: number,
+  padX: number,
+  padY: number,
+  threshold: number
+): Box[] {
   const count = 8400;
   const candidates: Box[] = [];
   for (let i = 0; i < count; i++) {
-    const smoke = data[4 * count + i], fire = data[5 * count + i];
-    const cls = fire > smoke ? 1 : 0, score = Math.max(smoke, fire);
+    const smoke = data[4 * count + i];
+    const fire = data[5 * count + i];
+    const score = smoke > fire ? smoke : fire;
     if (score < threshold) continue;
-    const cx = data[i], cy = data[count + i], bw = data[2 * count + i], bh = data[3 * count + i];
+    const cls = fire > smoke ? 1 : 0;
+    const cx = data[i];
+    const cy = data[count + i];
+    const bw = data[2 * count + i];
+    const bh = data[3 * count + i];
     const x = Math.max(0, Math.min(width, (cx - bw / 2 - padX) / scale));
     const y = Math.max(0, Math.min(height, (cy - bh / 2 - padY) / scale));
     const x2 = Math.max(0, Math.min(width, (cx + bw / 2 - padX) / scale));
@@ -33,8 +53,10 @@ function decode(data: Float32Array, width: number, height: number, scale: number
   candidates.sort((a, b) => b.score - a.score);
   const kept: Box[] = [];
   for (const box of candidates) {
-    if (kept.every((other) => other.cls !== box.cls || iou(box, other) < IOU_THRESHOLD)) kept.push(box);
-    if (kept.length >= 80) break;
+    if (kept.every((other) => other.cls !== box.cls || iou(box, other) < IOU_THRESHOLD)) {
+      kept.push(box);
+    }
+    if (kept.length >= 40) break; // mniej boxów = szybciej
   }
   return kept;
 }
@@ -42,21 +64,16 @@ function decode(data: Float32Array, width: number, height: number, scale: number
 function formatTime(seconds: number) {
   if (!Number.isFinite(seconds)) return "0:00";
   const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60).toString().padStart(2, "0");
+  const secs = Math.floor(seconds % 60)
+    .toString()
+    .padStart(2, "0");
   return `${mins}:${secs}`;
 }
 
-/** Sprawdza, czy blob wygląda na prawidłowy plik MP4 */
 async function isValidMp4(blob: Blob): Promise<boolean> {
-  if (blob.size < 10_000) return false; // za mały
+  if (blob.size < 10_000) return false;
   const header = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
-  // ftyp box (ISO BMFF / MP4)
-  const isFtyp =
-    header[4] === 0x66 && // f
-    header[5] === 0x74 && // t
-    header[6] === 0x79 && // y
-    header[7] === 0x70;  // p
-  return isFtyp;
+  return header[4] === 0x66 && header[5] === 0x74 && header[6] === 0x79 && header[7] === 0x70;
 }
 
 export default function FireSmokeDemo() {
@@ -65,10 +82,17 @@ export default function FireSmokeDemo() {
   const sessionRef = useRef<InferenceSession | null>(null);
   const ortRef = useRef<(typeof import("onnxruntime-web") | typeof import("onnxruntime-web/webgpu")) | null>(null);
   const sessionPromiseRef = useRef<Promise<void> | null>(null);
+
+  // Reużywane bufory – zero alokacji w pętli
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const inputBufferRef = useRef<Float32Array | null>(null);
+  const lastBoxesRef = useRef<Box[]>([]);
+
   const rafRef = useRef<number | null>(null);
   const busyRef = useRef(false);
   const lastRunRef = useRef(0);
+  const intervalRef = useRef(BASE_INTERVAL);
+  const lastUiUpdateRef = useRef(0);
 
   const [fileUrl, setFileUrl] = useState("");
   const [fileName, setFileName] = useState("");
@@ -96,43 +120,57 @@ export default function FireSmokeDemo() {
       return Promise.resolve();
     }
     if (sessionPromiseRef.current) return sessionPromiseRef.current;
+
     setModelState("loading");
     setModelError("");
     setStatus("Przygotowujemy model do analizy. Pierwsze ładowanie może potrwać chwilę.");
+
     const task = (async () => {
-      const response = await fetch("/models/fire-smoke-yolo26s.onnx", { cache: "no-store" });
+      const response = await fetch("/models/fire-smoke-yolo26s.onnx", { cache: "force-cache" });
       if (!response.ok) throw new Error(`Model ONNX nie został pobrany (HTTP ${response.status}).`);
       const modelBytes = new Uint8Array(await response.arrayBuffer());
+
       if (modelBytes.byteLength < 1024 * 1024) {
         const preview = new TextDecoder().decode(modelBytes.subarray(0, 200));
-        if (preview.includes("git-lfs.github.com/spec")) throw new Error("Serwer zwrócił wskaźnik Git LFS zamiast modelu ONNX.");
+        if (preview.includes("git-lfs.github.com/spec")) {
+          throw new Error("Serwer zwrócił wskaźnik Git LFS zamiast modelu ONNX.");
+        }
         throw new Error(`Pobrany model jest niepełny (${modelBytes.byteLength} B).`);
       }
       if (modelBytes[0] !== 0x08) throw new Error("Pobrany plik nie wygląda na model ONNX.");
+
+      // Preferuj WebGPU, potem WASM
       if ("gpu" in navigator) {
         try {
           const ort = await import("onnxruntime-web/webgpu");
           ort.env.wasm.wasmPaths = "/ort/";
           ort.env.webgpu.powerPreference = "high-performance";
-          sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["webgpu", "wasm"] });
+          sessionRef.current = await ort.InferenceSession.create(modelBytes, {
+            executionProviders: ["webgpu", "wasm"],
+          });
           ortRef.current = ort;
         } catch {
           setStatus("Akceleracja GPU jest niedostępna. Przygotowujemy model do pracy na CPU.");
         }
       }
+
       if (!sessionRef.current) {
         const ort = await import("onnxruntime-web");
         ort.env.wasm.wasmPaths = "/ort/";
-        ort.env.wasm.proxy = true;
-        try {
-          sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["wasm"] });
-        } catch {
-          ort.env.wasm.proxy = false;
-          sessionRef.current = await ort.InferenceSession.create(modelBytes, { executionProviders: ["wasm"] });
-        }
+        // proxy czasem spowalnia – wyłączamy domyślnie
+        ort.env.wasm.proxy = false;
+        sessionRef.current = await ort.InferenceSession.create(modelBytes, {
+          executionProviders: ["wasm"],
+        });
         ortRef.current = ort;
       }
-      if (!sessionRef.current || !ortRef.current) throw new Error("Nie udało się uruchomić silnika ONNX.");
+
+      if (!sessionRef.current || !ortRef.current) {
+        throw new Error("Nie udało się uruchomić silnika ONNX.");
+      }
+
+      // Pre-alokuj bufor wejściowy
+      inputBufferRef.current = new Float32Array(3 * SIZE * SIZE);
     })()
       .then(() => {
         setModelState("ready");
@@ -148,6 +186,7 @@ export default function FireSmokeDemo() {
       .finally(() => {
         sessionPromiseRef.current = null;
       });
+
     sessionPromiseRef.current = task;
     return task;
   }, []);
@@ -169,6 +208,7 @@ export default function FireSmokeDemo() {
       setCurrentTime(0);
       setDuration(0);
       setStats({ count: 0, top: 0, latency: 0 });
+      lastBoxesRef.current = [];
       void ensureSession().catch(() => {});
     },
     [clearLoop, ensureSession, fileUrl]
@@ -176,93 +216,136 @@ export default function FireSmokeDemo() {
 
   const loadDemoVideo = useCallback(async () => {
     setStatus("Wczytywanie przykładowego nagrania…");
-    const response = await fetch(DEMO_VIDEO, { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error(`Nie udało się pobrać filmu (HTTP ${response.status}).`);
-    }
+    const response = await fetch(DEMO_VIDEO, { cache: "force-cache" });
+    if (!response.ok) throw new Error(`Nie udało się pobrać filmu (HTTP ${response.status}).`);
     const blob = await response.blob();
-
     if (!(await isValidMp4(blob))) {
       throw new Error(
-        `Plik demo jest nieprawidłowy (${blob.size} B). Upewnij się, że w public/videos/demo_yolo_vid_1.mp4 leży prawdziwy plik MP4 (nie wskaźnik Git LFS).`
+        `Plik demo jest nieprawidłowy (${blob.size} B). Upewnij się, że w public/videos/demo_yolo_vid_1.mp4 leży prawdziwy plik MP4.`
       );
     }
-
     const file = new File([blob], "demo_yolo_vid_1.mp4", { type: "video/mp4" });
     chooseFile(file);
   }, [chooseFile]);
 
+  const drawBoxes = useCallback((ctx: CanvasRenderingContext2D, boxes: Box[], w: number, h: number) => {
+    ctx.clearRect(0, 0, w, h);
+    if (!boxes.length) return;
+
+    const ratio = Math.max(1, w / 960);
+    ctx.lineWidth = 3 * ratio;
+    ctx.font = `600 ${Math.round(16 * ratio)}px system-ui, sans-serif`;
+
+    for (const box of boxes) {
+      const color = box.cls === 1 ? "#ff634f" : "#61d7ff";
+      const label = `${CLASSES[box.cls]} ${(box.score * 100).toFixed(0)}%`;
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.strokeRect(box.x, box.y, box.w, box.h);
+
+      const labelW = ctx.measureText(label).width + 16;
+      const labelH = 27 * ratio;
+      const labelY = Math.max(0, box.y - labelH);
+      ctx.fillRect(box.x, labelY, labelW, labelH);
+      ctx.fillStyle = "#08101b";
+      ctx.fillText(label, box.x + 8 * ratio, labelY + 19 * ratio);
+    }
+  }, []);
+
   const detect = useCallback(async () => {
-    const video = videoRef.current,
-      canvas = canvasRef.current;
-    if (!video || !canvas || video.readyState < 2 || busyRef.current) return;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || video.readyState < 2 || busyRef.current || video.paused || document.hidden) {
+      return;
+    }
+
     busyRef.current = true;
     const started = performance.now();
-    const w = video.videoWidth,
-      h = video.videoHeight;
+    const w = video.videoWidth;
+    const h = video.videoHeight;
     if (!w || !h) {
       busyRef.current = false;
       return;
     }
+
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
     }
-    const ctx = canvas.getContext("2d");
+
+    const ctx = canvas.getContext("2d", { alpha: true });
     if (!ctx) {
       busyRef.current = false;
       return;
     }
+
     try {
       await ensureSession();
       const ort = ortRef.current;
-      if (!ort) throw new Error("Nie udało się uruchomić silnika ONNX.");
-      if (!frameCanvasRef.current) frameCanvasRef.current = document.createElement("canvas");
+      const session = sessionRef.current;
+      if (!ort || !session) throw new Error("Sesja modelu nie jest gotowa.");
+
+      // Reużyj canvasa klatki
+      if (!frameCanvasRef.current) {
+        frameCanvasRef.current = document.createElement("canvas");
+        frameCanvasRef.current.width = SIZE;
+        frameCanvasRef.current.height = SIZE;
+      }
       const frame = frameCanvasRef.current;
-      frame.width = SIZE;
-      frame.height = SIZE;
       const fctx = frame.getContext("2d", { willReadFrequently: true });
       if (!fctx) throw new Error("Nie udało się przygotować klatki wideo.");
+
       const scale = Math.min(SIZE / w, SIZE / h);
-      const drawW = Math.round(w * scale),
-        drawH = Math.round(h * scale);
-      const padX = (SIZE - drawW) / 2,
-        padY = (SIZE - drawH) / 2;
-      fctx.fillStyle = "rgb(114, 114, 114)";
+      const drawW = Math.round(w * scale);
+      const drawH = Math.round(h * scale);
+      const padX = (SIZE - drawW) / 2;
+      const padY = (SIZE - drawH) / 2;
+
+      fctx.fillStyle = "rgb(114,114,114)";
       fctx.fillRect(0, 0, SIZE, SIZE);
       fctx.drawImage(video, padX, padY, drawW, drawH);
+
       const rgba = fctx.getImageData(0, 0, SIZE, SIZE).data;
-      const input = new Float32Array(3 * SIZE * SIZE);
-      for (let i = 0; i < SIZE * SIZE; i++) {
-        input[i] = rgba[i * 4] / 255;
-        input[SIZE * SIZE + i] = rgba[i * 4 + 1] / 255;
-        input[2 * SIZE * SIZE + i] = rgba[i * 4 + 2] / 255;
+
+      // Reużyj bufora Float32
+      let input = inputBufferRef.current;
+      if (!input) {
+        input = new Float32Array(3 * SIZE * SIZE);
+        inputBufferRef.current = input;
       }
+
+      // Szybsza konwersja RGB → CHW
+      const plane = SIZE * SIZE;
+      for (let i = 0, p = 0; i < plane; i++, p += 4) {
+        input[i] = rgba[p] * 0.00392156862745098; // /255
+        input[plane + i] = rgba[p + 1] * 0.00392156862745098;
+        input[plane * 2 + i] = rgba[p + 2] * 0.00392156862745098;
+      }
+
       const tensor = new ort.Tensor("float32", input, [1, 3, SIZE, SIZE]);
-      const session = sessionRef.current;
-      if (!session) throw new Error("Sesja modelu nie jest gotowa.");
       const result = await session.run({ [session.inputNames[0]]: tensor });
       const output = result[session.outputNames[0]];
       const boxes = decode(output.data as Float32Array, w, h, scale, padX, padY, confidenceRef.current);
-      ctx.clearRect(0, 0, w, h);
-      const ratio = Math.max(1, w / 960);
-      ctx.lineWidth = 3 * ratio;
-      ctx.font = `600 ${Math.round(16 * ratio)}px system-ui, sans-serif`;
-      for (const box of boxes) {
-        const color = box.cls === 1 ? "#ff634f" : "#61d7ff";
-        const label = `${CLASSES[box.cls]} ${(box.score * 100).toFixed(0)}%`;
-        ctx.strokeStyle = color;
-        ctx.fillStyle = color;
-        ctx.strokeRect(box.x, box.y, box.w, box.h);
-        const labelW = ctx.measureText(label).width + 16,
-          labelH = 27 * ratio;
-        const labelY = Math.max(0, box.y - labelH);
-        ctx.fillRect(box.x, labelY, labelW, labelH);
-        ctx.fillStyle = "#08101b";
-        ctx.fillText(label, box.x + 8 * ratio, labelY + 19 * ratio);
+
+      lastBoxesRef.current = boxes;
+      drawBoxes(ctx, boxes, w, h);
+
+      const latency = performance.now() - started;
+
+      // Adaptacyjny interwał: jeśli wolno → rzadziej
+      if (latency > 320) {
+        intervalRef.current = Math.min(MAX_INTERVAL, intervalRef.current + 40);
+      } else if (latency < 120) {
+        intervalRef.current = Math.max(MIN_INTERVAL, intervalRef.current - 20);
       }
-      setStats({ count: boxes.length, top: boxes[0]?.score ?? 0, latency: performance.now() - started });
-      setStatus(boxes.length ? "Detekcja aktywna" : "Analiza trwa · nie wykryto obiektów w tej klatce");
+
+      // UI update max ~4× na sekundę
+      const now = performance.now();
+      if (now - lastUiUpdateRef.current > 250) {
+        lastUiUpdateRef.current = now;
+        setStats({ count: boxes.length, top: boxes[0]?.score ?? 0, latency });
+        setStatus(boxes.length ? "Detekcja aktywna" : "Analiza trwa · nie wykryto obiektów w tej klatce");
+      }
     } catch (error) {
       clearLoop();
       video.pause();
@@ -271,19 +354,21 @@ export default function FireSmokeDemo() {
     } finally {
       busyRef.current = false;
     }
-  }, [clearLoop, ensureSession]);
+  }, [clearLoop, drawBoxes, ensureSession]);
 
   const tick = useCallback(
     (time: number) => {
       const video = videoRef.current;
-      if (!video || video.paused || video.ended) {
+      if (!video || video.paused || video.ended || document.hidden) {
         rafRef.current = null;
         return;
       }
-      if (time - lastRunRef.current > 220 && !busyRef.current) {
+
+      if (time - lastRunRef.current >= intervalRef.current && !busyRef.current) {
         lastRunRef.current = time;
         void detect();
       }
+
       rafRef.current = requestAnimationFrame(tick);
     },
     [detect]
@@ -299,6 +384,7 @@ export default function FireSmokeDemo() {
       setPlaying(true);
       clearLoop();
       lastRunRef.current = 0;
+      intervalRef.current = BASE_INTERVAL;
       rafRef.current = requestAnimationFrame(tick);
     } catch (error) {
       console.error("Błąd video.play():", error);
@@ -319,10 +405,10 @@ export default function FireSmokeDemo() {
     setStatus("Analiza wstrzymana");
   };
 
-  // Auto-load demo (tylko jeśli plik jest poprawny)
+  // Auto-load demo
   useEffect(() => {
     let cancelled = false;
-    const loadDemo = async () => {
+    (async () => {
       try {
         await loadDemoVideo();
       } catch (error) {
@@ -334,22 +420,20 @@ export default function FireSmokeDemo() {
             : "Nie udało się wczytać przykładowego nagrania."
         );
       }
-    };
-    void loadDemo();
+    })();
     return () => {
       cancelled = true;
     };
   }, [loadDemoVideo]);
 
-  // Autoplay po wczytaniu demo + gotowym modelu
+  // Autoplay po wczytaniu demo
   useEffect(() => {
-    if (fileName !== "demo_yolo_vid_1.mp4" || !fileUrl || modelState !== "ready") {
-      return;
-    }
+    if (fileName !== "demo_yolo_vid_1.mp4" || !fileUrl || modelState !== "ready") return;
     const video = videoRef.current;
     if (!video) return;
     let cancelled = false;
-    const autoplay = async () => {
+
+    (async () => {
       try {
         if (video.readyState < 2) {
           await new Promise<void>((resolve, reject) => {
@@ -381,12 +465,26 @@ export default function FireSmokeDemo() {
         console.error("Automatyczne uruchomienie demo nie powiodło się:", error);
         setStatus("Film wczytany. Kliknij ▶, aby rozpocząć analizę.");
       }
-    };
-    void autoplay();
+    })();
+
     return () => {
       cancelled = true;
     };
   }, [fileName, fileUrl, modelState]);
+
+  // Zatrzymaj pętlę gdy karta jest w tle
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) {
+        clearLoop();
+      } else if (playing && videoRef.current && !videoRef.current.paused) {
+        lastRunRef.current = 0;
+        rafRef.current = requestAnimationFrame(tick);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [clearLoop, playing, tick]);
 
   return (
     <section className="fire-demo wrap" aria-labelledby="fire-title">
@@ -423,6 +521,7 @@ export default function FireSmokeDemo() {
             </span>
             <span className="btn">Przeglądaj pliki</span>
           </label>
+
           <div className="fire-confidence">
             <label htmlFor="fire-confidence">
               Pewność detekcji <b>{Math.round(confidence * 100)}%</b>
@@ -442,6 +541,7 @@ export default function FireSmokeDemo() {
             />
             <small>Minimalna pewność wykrycia obiektu</small>
           </div>
+
           <div className="fire-stage" style={{ aspectRatio: aspect }}>
             {fileUrl ? (
               <>
@@ -451,17 +551,10 @@ export default function FireSmokeDemo() {
                   src={fileUrl}
                   playsInline
                   muted
-                  preload="metadata"
+                  preload="auto"
                   onError={(e) => {
                     const video = e.currentTarget;
                     const mediaError = video.error;
-                    console.error("Błąd wideo:", {
-                      src: video.currentSrc,
-                      code: mediaError?.code,
-                      message: mediaError?.message,
-                      networkState: video.networkState,
-                      readyState: video.readyState,
-                    });
                     setStatus(
                       `Nie udało się wczytać filmu. ${mediaError?.message || `Kod błędu: ${mediaError?.code ?? "nieznany"}`}`
                     );
@@ -483,6 +576,7 @@ export default function FireSmokeDemo() {
                     setPlaying(true);
                     clearLoop();
                     lastRunRef.current = 0;
+                    intervalRef.current = BASE_INTERVAL;
                     rafRef.current = requestAnimationFrame(tick);
                   }}
                   onEnded={() => {
@@ -505,6 +599,7 @@ export default function FireSmokeDemo() {
               </div>
             )}
           </div>
+
           {fileUrl && (
             <div className="fire-player" aria-label="Sterowanie nagraniem">
               <button
@@ -534,12 +629,14 @@ export default function FireSmokeDemo() {
               <span className="fire-player-time">{formatTime(duration)}</span>
             </div>
           )}
+
           <div className="fire-controls">
             <span className="fire-status">
               <i className={playing ? "live" : ""} />
               {loading ? "Uruchamianie modelu…" : status}
             </span>
           </div>
+
           {modelState === "loading" && (
             <p className="fire-model-note" role="status">
               Przygotowanie modelu może potrwać chwilę. Analizę będzie można uruchomić po zakończeniu.
@@ -548,17 +645,12 @@ export default function FireSmokeDemo() {
           {modelState === "error" && (
             <div className="fire-model-error">
               <p>{modelError}</p>
-              <button
-                className="btn"
-                type="button"
-                onClick={() => {
-                  void ensureSession().catch(() => {});
-                }}
-              >
+              <button className="btn" type="button" onClick={() => void ensureSession().catch(() => {})}>
                 Ponów przygotowanie modelu
               </button>
             </div>
           )}
+
           <div className="fire-examples">
             <div>
               <h2>Przykładowe nagrania</h2>
@@ -590,6 +682,7 @@ export default function FireSmokeDemo() {
             </button>
           </div>
         </div>
+
         <aside className="fire-side">
           <p className="fire-side-label">WYNIK NA ŻYWO</p>
           <div className="fire-metric">
