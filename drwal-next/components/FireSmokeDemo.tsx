@@ -18,7 +18,7 @@ const IOU_THRESHOLD = 0.45;
 const CLASSES = ["Smoke", "Fire"];
 
 // Plik umieszczony w public/videos/
-const DEMO_VIDEO = "/videos/yolo_demo_1.mp4";
+const DEMO_VIDEO = "/videos/demo_yolo_vid_1.mp4";
 
 function iou(a: Box, b: Box) {
   const x1 = Math.max(a.x, b.x);
