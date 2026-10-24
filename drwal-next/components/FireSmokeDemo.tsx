@@ -57,7 +57,7 @@ export default function FireSmokeDemo() {
   const lastRunRef = useRef(0);
   const [fileUrl, setFileUrl] = useState("");
   const [fileName, setFileName] = useState("");
-  const DEMO_VIDEO = "/demo_yolo_vid_1.mp4";
+  const DEMO_VIDEO = "/videos/demo_yolo_vid_1.mp4";
   const [aspect, setAspect] = useState(16 / 9);
   const [confidence, setConfidence] = useState(0.1);
   const confidenceRef = useRef(0.1);
