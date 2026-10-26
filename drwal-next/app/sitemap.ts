@@ -19,5 +19,17 @@ lastModified: new Date("2026-10-14"),
 changeFrequency: "monthly",
 priority: 0.8,
 },
+{
+url: `${baseUrl}/demos`,
+lastModified: new Date("2026-10-24"),
+changeFrequency: "monthly",
+priority: 0.7,
+},
+{
+url: `${baseUrl}/demos/fire-smoke`,
+lastModified: new Date("2026-10-24"),
+changeFrequency: "monthly",
+priority: 0.6,
+},
 ];
 }

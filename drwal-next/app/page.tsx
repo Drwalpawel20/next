@@ -194,6 +194,7 @@ export default function Home() {
               </div>
               <Magnetic><a className="btn primary big" href="https://drwalpawel20.github.io/brain-tumor-demo/" target="_blank" rel="noopener">Uruchom demo</a></Magnetic>
             </div>
+            <p className="demo-more"><a className="ulink" href="/demos">Wszystkie demo, w tym wykrywanie ognia i dymu na wideo</a></p>
           </div>
         </section>
 
