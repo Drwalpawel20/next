@@ -1,6 +1,4 @@
 import Link from "next/link";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import type { Metadata } from "next";
 import Header from "@/components/Header";
 import Footer from "@/components/Footer";
@@ -20,8 +18,7 @@ export const metadata: Metadata = {
 };
 
 const mri = PROJECTS.find((p) => p.name === "aplikacja_kliniczna")!.slides[0];
-/* Okładka ognia i dymu: prawdziwa klatka z detekcjami, jeśli ją wygenerowałeś (scripts/make_preview.py), inaczej ilustracja. */
-const hasPreview = existsSync(join(process.cwd(), "public", "demos", "fire-smoke-preview.jpg"));
+const fire = PROJECTS.find((p) => p.name === "fire-smoke-yolo")!.slides[0];
 
 const tiles = [
   {
@@ -33,7 +30,7 @@ const tiles = [
     meta: [["Wejście", "Zdjęcie MRI"], ["Wynik", "Top 3 i mapa uwagi"], ["Silnik", "TensorFlow.js"]],
     note: "Projekt edukacyjny, nie narzędzie do diagnozy.",
     badge: "30 klas",
-    image: { src: mri.fb ?? mri.img, alt: "Zrzut ekranu klasyfikatora MRI z wynikiem i mapą uwagi" },
+    image: { src: mri.img, alt: "Zrzut ekranu klasyfikatora MRI z wynikiem i mapą uwagi" },
   },
   {
     href: "/demos/fire-smoke",
@@ -44,9 +41,7 @@ const tiles = [
     meta: [["Wejście", "Nagranie wideo"], ["Wynik", "Ramki z pewnością"], ["Model", "ok. 38 MB"]],
     note: "Demo edukacyjne, nie system alarmowy.",
     badge: "YOLO26s",
-    image: hasPreview
-      ? { src: "/demos/fire-smoke-preview.jpg", alt: "Klatka z nagrania z ramkami wokół ognia i dymu" }
-      : { src: "/demos/fire-smoke.svg", alt: "Ilustracja: ramki detekcji wokół płomienia i dymu", illustration: true },
+    image: { src: fire.img, alt: "Klatka z nagrania z ramkami wokół ognia i dymu" },
   },
 ] as const;
 
@@ -93,7 +88,6 @@ export default function DemosPage() {
                   <div className="demo-cover">
                     <img src={tile.image.src} alt={tile.image.alt} width={1280} height={720} loading="eager" decoding="async" />
                     <span className="demo-badge" translate="no">{tile.badge}</span>
-                    {"illustration" in tile.image && <span className="demo-badge soft">Ilustracja</span>}
                   </div>
                   <div className="demo-tile-body">
                     <p className="demo-tile-kind">{tile.kind}</p>

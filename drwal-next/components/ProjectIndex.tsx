@@ -106,7 +106,7 @@ export default function ProjectIndex() {
                           <img className="fg" src={p.slides[0].img} alt={p.slides[0].cap} loading="lazy" decoding="async" width={300} height={640} />
                         </>
                       ) : (
-                        <img src={p.slides[0].fb || p.slides[0].img} alt="" loading="lazy" decoding="async" width={640} height={400} />
+                        <img src={p.slides[0].img} alt="" loading="lazy" decoding="async" width={640} height={400} onError={(e) => { const fb = p.slides[0].fb; if (fb && e.currentTarget.src !== fb) e.currentTarget.src = fb; }} />
                       ) : (
                         <div className="pc-type" style={{ "--c": LANG_COLORS[p.lang] || "#888" } as React.CSSProperties}><span>{p.tags.slice(0, 3).join(" / ")}</span></div>
                       )}

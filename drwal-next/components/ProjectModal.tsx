@@ -69,7 +69,7 @@ export default function ProjectModal({ p, onClose }: { p: Project; onClose: () =
           <div className="btns">
             {p.private ? (
               <>
-                {p.demo && <a className="btn primary" href={p.demo} target="_blank" rel="noopener">Przetestuj demo</a>}
+                {p.demo && <a className="btn primary" href={p.demo} {...(p.demo.startsWith("/") ? {} : { target: "_blank", rel: "noopener" })}>Przetestuj demo</a>}
                 <a
                   className="btn" href="#kontakt"
                   onClick={() => { document.documentElement.style.overflow = ""; onClose(); dispatchEvent(new CustomEvent("ask-project", { detail: p.title || p.name })); }}

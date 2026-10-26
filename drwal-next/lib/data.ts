@@ -31,6 +31,28 @@ export const FILTERS = ["Python", "Kotlin", "Java", "JavaScript", "Power BI", "M
 
 export const PROJECTS: Project[] = [
   {
+    name: "fire-smoke-yolo",
+    title: "Wykrywanie ognia i dymu (YOLO26s)",
+    lang: "Python",
+    private: true,
+    demo: "/demos/fire-smoke",
+    desc: "Model YOLO26s wykrywa ogień i dym na nagraniach wideo. Działa w aplikacji desktopowej i w przeglądarce.",
+    long: "Detektor obiektów YOLO26s z dwiema klasami: ogień i dym. Do testów napisałem aplikację desktopową w PySide6, która analizuje film klatka po klatce, pokazuje FPS i czas inferencji, zlicza wykrycia i potrafi zapisać wynik jako nowe wideo. Ten sam model, wyeksportowany do ONNX, działa też w przeglądarce na stronie z demo: na karcie graficznej (WebGPU) albo na procesorze (WebAssembly), bez wysyłania pliku na serwer. Projekt edukacyjny, nie system alarmowy.",
+    points: [
+      "Dwie klasy, ogień i dym, wejście 640 px",
+      "Aplikacja desktopowa w PySide6: podgląd na żywo, FPS, czas klatki, statystyki wykryć",
+      "Przewijanie, pauza i eksport nagrania z naniesionymi ramkami",
+      "Eksport do ONNX i demo w przeglądarce (WebGPU lub WebAssembly)",
+    ],
+    tags: ["Python", "YOLO26s", "Ultralytics", "PySide6", "OpenCV", "ONNX"],
+    metrics: [{ l: "Klasy", v: "2" }, { l: "Wejście", v: "640 px" }, { l: "Eksport", v: "ONNX" }],
+    slides: [
+      { img: "/projects/yolo-fire-smoke-1.webp", cap: "Ogień i dym wykryte na nagraniu z kamery" },
+      { img: "/projects/yolo-fire-smoke-2.webp", cap: "Nocny pożar: wiele ramek ognia i jedna ramka dymu" },
+      { img: "/projects/yolo-fire-smoke-3.webp", cap: "Ogień i dym na nagraniu nocnym" },
+    ],
+  },
+  {
     name: "matlab-fordfulkerson",
     title: "Maksymalny przepływ: Ford-Fulkerson w MATLAB-ie",
     lang: "MATLAB",
