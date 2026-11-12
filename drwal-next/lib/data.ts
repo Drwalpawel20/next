@@ -31,28 +31,6 @@ export const FILTERS = ["Python", "Kotlin", "Java", "JavaScript", "Power BI", "M
 
 export const PROJECTS: Project[] = [
   {
-    name: "ecommerce-airflow-kafka-pipeline",
-    title: "Platforma danych: Airflow, Kafka, S3 i Databricks",
-    lang: "Python",
-    private: true,
-    desc: "Pipeline danych: Supabase przez Airflow do S3 i Databricks (Silver, Gold), a równolegle S3 przez SQS i Kafkę do warstwy bronze. Całość w Docker Compose.",
-    long: "Projekt pokazuje integrację kilku narzędzi w jednym przepływie. Airflow 3 pobiera tabele z Supabase stronami, sprawdza liczbę wierszy i schemat, a dopiero potem wysyła pliki parquet do S3 (historia w archive/, najnowsza wersja w raw/). Po uploadzie uruchamiane są joby Silver i Gold w Databricks. Równolegle zdarzenia S3 trafiają przez SQS do listenera, który publikuje rekordy na topic Kafki. Konsument zapisuje je do warstwy bronze, odrzucając duplikaty dzięki deterministycznemu event_id. Monitoring to Prometheus, kafka-exporter i Grafana.",
-    points: [
-      "Airflow 3: ekstrakcja z paginacją, walidacja liczby wierszy i schematu, upload z kontrolą rozmiaru",
-      "Joby Silver i Gold w Databricks, uruchamiane z DAG-a",
-      "S3 → SQS → Kafka: listener, producer i konsument z deduplikacją",
-      "Docker Compose: Airflow, Kafka, Prometheus i Grafana",
-    ],
-    tags: ["Python", "Apache Airflow", "Kafka", "Databricks", "AWS S3", "SQS", "Docker"],
-    metrics: [{ l: "Usługi w compose", v: "15" }, { l: "Partycje Kafki", v: "3" }, { l: "Warstwy danych", v: "4" }],
-    slides: [
-      { img: "/projects/pipeline-airflow-dag.webp", cap: "DAG: ekstrakcja, upload do S3 i joby Databricks w jednym runie" },
-      { img: "/projects/pipeline-kafka-topic.webp", cap: "Topic orders: 10 000 wiadomości w 3 partycjach" },
-      { img: "/projects/pipeline-prometheus-targets.webp", cap: "Prometheus: cele kafka-exporter i prometheus w stanie UP" },
-      { img: "/projects/pipeline-s3-layers.webp", cap: "Bucket S3: warstwy raw, archive, silver i gold" },
-    ],
-  },
-  {
     name: "fire-smoke-yolo",
     title: "Wykrywanie ognia i dymu (YOLO26s)",
     lang: "Python",
@@ -118,7 +96,7 @@ export const PROJECTS: Project[] = [
     title: "Klasyfikator zdjęć MRI mózgu",
     lang: "Python",
     private: true,
-    demo: "https://drwalpawel20.github.io/brain-tumor-demo/",
+    demo: "/demos/brain-tumor",
     desc: "Rozpoznaje typ guza na zdjęciu MRI (30 klas) i pokazuje, na co patrzył model. Trafność ok. 97%.",
     long: "Aplikacja desktopowa. Najpierw czyści obraz z tła, potem model Keras (ok. 97% trafności, 30 klas: typ zmiany i sekwencja T1, T1C+, T2) podaje trzy najbardziej prawdopodobne odpowiedzi, a Grad-CAM zaznacza miejsca, które miały największy wpływ na wynik. Interfejs w Tkinterze, po polsku i angielsku. To projekt edukacyjny, nie narzędzie do diagnozy.",
     points: [
