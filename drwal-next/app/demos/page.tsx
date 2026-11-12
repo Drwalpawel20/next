@@ -22,8 +22,8 @@ const fire = PROJECTS.find((p) => p.name === "fire-smoke-yolo")!.slides[0];
 
 const tiles = [
   {
-    href: "https://drwalpawel20.github.io/brain-tumor-demo/",
-    external: true,
+    href: "/demos/brain-tumor",
+    external: false,
     kind: "Klasyfikacja obrazu",
     title: "Guz mózgu na zdjęciu MRI",
     body: "Wgrywasz zdjęcie rezonansu, a model wskazuje trzy najbardziej prawdopodobne rozpoznania. Mapa uwagi pokazuje, które fragmenty obrazu najmocniej wpłynęły na wynik.",
@@ -54,7 +54,7 @@ const steps = [
 const spec = [
   ["Detekcja na wideo", "YOLO26s, wejście 640 × 640 px, dwie klasy: ogień i dym, eksport do formatu ONNX"],
   ["Silnik wideo", "ONNX Runtime Web, WebGPU z awaryjnym przejściem na WebAssembly"],
-  ["Klasyfikacja MRI", "TensorFlow.js, 30 klas, mapa uwagi metodą okluzji"],
+  ["Klasyfikacja MRI", "TensorFlow.js, 30 klas, mapa uwagi metodą Grad-CAM"],
   ["Hosting", "Statyczna strona w Next.js, bez serwera, który analizowałby Twoje pliki"],
 ];
 
@@ -70,7 +70,7 @@ export default function DemosPage() {
           inLanguage: "pl-PL",
           author: { "@type": "Person", name: SITE.name, url: SITE.url + "/" },
           hasPart: [
-            { "@type": "WebApplication", name: "Klasyfikator zdjęć MRI mózgu", url: tiles[0].href, applicationCategory: "EducationalApplication", operatingSystem: "Przeglądarka" },
+            { "@type": "WebApplication", name: "Klasyfikator zdjęć MRI mózgu", url: SITE.url + tiles[0].href, applicationCategory: "EducationalApplication", operatingSystem: "Przeglądarka" },
             { "@type": "WebApplication", name: "Wykrywanie ognia i dymu na wideo", url: SITE.url + tiles[1].href, applicationCategory: "EducationalApplication", operatingSystem: "Przeglądarka" },
           ],
         }}
