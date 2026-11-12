@@ -40,8 +40,18 @@ export default function BrainTumorDemo() {
   const engine = useRef<Engine | null>(null);
   const warm = useRef<Promise<void>>(Promise.resolve());
   const busy = useRef(false);
-  const proc = useRef<HTMLCanvasElement>(null);
-  const camCanvas = useRef<HTMLCanvasElement>(null);
+  const proc = useRef<HTMLCanvasElement | null>(null);
+  const camCanvas = useRef<HTMLCanvasElement | null>(null);
+  const rgbRef = useRef<Uint8Array | null>(null);
+  const overlayRef = useRef<Uint8ClampedArray | null>(null);
+
+  // Płótna montują się dopiero po animacji wyjścia pola uploadu (AnimatePresence mode="wait"),
+  // więc wynik zapamiętujemy i rysujemy zawsze, gdy tylko płótno istnieje.
+  const paint = useCallback(() => {
+    const c = proc.current, k = camCanvas.current;
+    if (c) { if (rgbRef.current) drawRGB(c, rgbRef.current); else c.getContext("2d")?.clearRect(0, 0, 260, 260); }
+    if (k) { if (overlayRef.current) k.getContext("2d")!.putImageData(new ImageData(overlayRef.current as any, 260, 260), 0, 0); else k.getContext("2d")?.clearRect(0, 0, 260, 260); }
+  }, []);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -74,20 +84,20 @@ export default function BrainTumorDemo() {
     if (!e || busy.current) return;
     busy.current = true;
     setHasImage(true); setTop(null); setCam("idle"); setError(null);
-    camCanvas.current?.getContext("2d")?.clearRect(0, 0, 260, 260);
+    rgbRef.current = null; overlayRef.current = null; paint();
     setPhase("working"); setStatus("Analizuję zdjęcie…"); setStep(1);
     try {
       await new Promise((r) => requestAnimationFrame(() => r(null)));
       await getCV(); await warm.current;
       const r = await runAnalysis(e, img, {
-        onProcessed: (rgb) => { if (proc.current) drawRGB(proc.current, rgb); setStep(2); },
+        onProcessed: (rgb) => { rgbRef.current = rgb; paint(); setStep(2); },
         onTop: (t) => { setTop(t); setStep(3); },
         onCamStart: () => setCam("loading"),
       });
       if (r.camFailed) { setCam("error"); }
       else if (!r.overlay) { setCam("na"); }
       else {
-        camCanvas.current?.getContext("2d")?.putImageData(new ImageData(r.overlay as any, 260, 260), 0, 0);
+        overlayRef.current = r.overlay; paint();
         setCam("done");
       }
       setStep(4); setPhase("done"); setStatus("Analiza zakończona");
@@ -96,7 +106,7 @@ export default function BrainTumorDemo() {
       setError(String(err?.message || err));
       setPhase("error"); setStatus("Wystąpił błąd podczas analizy");
     } finally { busy.current = false; }
-  }, []);
+  }, [paint]);
 
   const loadSrc = useCallback((src: string, revoke = false) => {
     const im = new Image();
@@ -111,7 +121,7 @@ export default function BrainTumorDemo() {
   };
 
   const reset = () => {
-    busy.current = false; setHasImage(false); setTop(null); setCam("idle"); setStep(0); setError(null);
+    busy.current = false; rgbRef.current = null; overlayRef.current = null; setHasImage(false); setTop(null); setCam("idle"); setStep(0); setError(null);
     if (fileInput.current) fileInput.current.value = "";
     setPhase("ready"); setStatus("Model gotowy");
   };
@@ -148,12 +158,12 @@ export default function BrainTumorDemo() {
             <motion.div key="view" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.3 }}>
               <div className={s.pair}>
                 <motion.figure initial={{ opacity: 0, scale: 0.92 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.6, ease: EASE }}>
-                  <canvas ref={proc} width={260} height={260} />
+                  <canvas ref={(el) => { proc.current = el; if (el) paint(); }} width={260} height={260} />
                   <figcaption>Po preprocessingu</figcaption>
                 </motion.figure>
                 <motion.figure initial={{ opacity: 0, scale: 0.92 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.6, ease: EASE, delay: 0.1 }}>
                   <div className={s.cam}>
-                    <canvas ref={camCanvas} width={260} height={260} style={{ opacity: cam === "done" ? 1 : 0.0, transition: "opacity .8s" }} />
+                    <canvas ref={(el) => { camCanvas.current = el; if (el) paint(); }} width={260} height={260} style={{ opacity: cam === "done" ? 1 : 0.0, transition: "opacity .8s" }} />
                     <div className={s.ph}>
                       {cam === "loading" && <span><span className={s.spin} />Liczę Grad-CAM…</span>}
                       {cam === "idle" && phase === "working" && <span className={s.shimmer} />}
